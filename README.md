@@ -282,7 +282,9 @@ This software is for educational and research purposes. The authors are not resp
 - **Security**: Report security issues privately to maintainers
 
 ---
-
+## Donations
 ### If you find this trading bot useful and profitable, please consider making a donation. 
 **BTC: bc1qyxdhqef7tszr75wy6y3w7rdfpr9y00cg6w0e8e**
+
+---
 **Happy Trading! 🚀📈**
