@@ -325,14 +325,14 @@ class UltimateAdaptiveBot:
         final_multiplier = peak_multiplier * confidence_multiplier * performance_multiplier
         final_position_btc = enhanced_position * final_multiplier
 
-        print(f"🔧 DEBUG: Base position: {enhanced_position:.8f} BTC")
-        print(f"🔧 DEBUG: Confidence mult: {confidence_multiplier:.2f}")
-        print(f"🔧 DEBUG: Peak mult: {peak_multiplier:.2f}")
-        print(f"🔧 DEBUG: Before bounds: {final_position_btc:.8f} BTC")
-        print(f"🔧 DEBUG: Performance mult: {performance_multiplier:.2f}")
-        print(f"🔧 DEBUG: Final multiplier: {final_multiplier:.2f}")
-        print(f"🔧 DEBUG: Final position: {final_position_btc:.8f} BTC")
-        print(f"🔧 DEBUG: Recent performance: {recent_performance.get('win_rate', 0.5):.2%}")
+        # print(f"🔧 DEBUG: Base position: {enhanced_position:.8f} BTC")
+        # print(f"🔧 DEBUG: Confidence mult: {confidence_multiplier:.2f}")
+        # print(f"🔧 DEBUG: Peak mult: {peak_multiplier:.2f}")
+        # print(f"🔧 DEBUG: Before bounds: {final_position_btc:.8f} BTC")
+        # print(f"🔧 DEBUG: Performance mult: {performance_multiplier:.2f}")
+        # print(f"🔧 DEBUG: Final multiplier: {final_multiplier:.2f}")
+        # print(f"🔧 DEBUG: Final position: {final_position_btc:.8f} BTC")
+        # print(f"🔧 DEBUG: Recent performance: {recent_performance.get('win_rate', 0.5):.2%}")
 
         # Apply bounds
 

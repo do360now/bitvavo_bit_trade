@@ -20,35 +20,42 @@ import requests
 
 class TradingBot:
     def __init__(self, data_manager: DataManager, trade_executor: TradeExecutor, onchain_analyzer: OnChainAnalyzer, order_manager: OrderManager = None):
+        # CRITICAL: Assign dependencies FIRST before using them
+        self.data_manager = data_manager
+        self.trade_executor = trade_executor
+        self.onchain_analyzer = onchain_analyzer
+        self.order_manager = order_manager
+        
+        # Then initialize other attributes
         self.max_position_size = 0.15
         self.stop_loss_percentage = 0.03
         self.take_profit_percentage = 0.10
         self.max_daily_trades = 8
         self.daily_trade_count = 0
-        self.data_manager = data_manager
-        self.trade_executor = trade_executor
-        self.onchain_analyzer = onchain_analyzer
-        self.order_manager = order_manager
         self.last_trade_time = 0
         self.max_cash_allocation = 0.9
         self.min_eur_for_trade = 5.0
         self.min_trade_volume = BITVAVO_CONFIG['MIN_ORDER_SIZE']
         self.recent_buys = []
         self._load_recent_buys()
+        
+        # NOW we can safely use self.trade_executor
         self.performance_tracker = PerformanceTracker(
             initial_btc_balance=self.trade_executor.get_total_btc_balance() or 0,
             initial_eur_balance=self.trade_executor.get_available_balance("EUR") or 0
         )
+        
         self.lookback_period = 96  # hours
         self.price_history = []
         self._initialize_price_history()
         self.start_time = time.time()
-        # self.metrics_server = MetricsServer(self)
-        # self.metrics_server.start()
-        self.ollama_url = "http://localhost:11434/api/generate"  # Assuming Ollama runs locally
+        self.ollama_url = "http://localhost:11434/api/generate"
         self.model_name = "gemma3:4b"
         self.last_rsi = 0
         self.last_sentiment = 0
+
+        self.last_daily_reset = datetime.now().date()
+        self.trade_session_file = "./trade_session.json"
 
     def _initialize_price_history(self):
         prices, _ = self.data_manager.load_price_history()
@@ -96,48 +103,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Failed to load price history for lookback: {e}")
 
-    def check_pending_orders(self):
-        if not self.order_manager:
-            return
-        try:
-            logger.debug("Checking pending orders...")
-            results = self.order_manager.check_and_update_orders()
-            if results['filled']:
-                logger.info(f"🎯 Orders FILLED: {results['filled']}")
-                for order_id in results['filled']:
-                    order_info = self.order_manager.filled_orders.get(order_id)
-                    if order_info:
-                        self.performance_tracker.record_trade(
-                            order_id=order_id,
-                            side=order_info['side'],
-                            volume=order_info['executed_volume'],
-                            price=order_info['average_price'],
-                            fee=order_info.get('fee', 0)
-                        )
-                        self.daily_trade_count += 1
-                    if order_info and order_info['side'] == 'buy':
-                        self.recent_buys.append((
-                            order_info['average_price'],
-                            order_info['executed_volume']
-                        ))
-                        self.recent_buys = self.recent_buys[-10:]
-                        self._save_recent_buys()
-                        logger.info(f"✅ Updated recent_buys with filled buy order {order_id}: {order_info['executed_volume']:.8f} BTC @ €{order_info['average_price']:.2f}")
-                    elif order_info and order_info['side'] == 'sell':
-                        avg_buy_price = self._estimate_avg_buy_price()
-                        if avg_buy_price:
-                            profit = (order_info['average_price'] - avg_buy_price) / avg_buy_price * 100
-                            logger.info(f"💰 Sell order filled with {profit:.2f}% profit")
-            if results['cancelled']:
-                logger.info(f"❌ Orders CANCELLED (timeout): {results['cancelled']}")
-            if results['partial']:
-                logger.info(f"📊 Orders PARTIALLY filled: {results['partial']}")
-                for order_id in results['partial']:
-                    if order_id in self.order_manager.pending_orders:
-                        order_info = self.order_manager.pending_orders[order_id]
-                        logger.info(f"  {order_id}: {order_info.get('executed_volume', 0):.8f}/{order_info['volume']:.8f} BTC filled")
-        except Exception as e:
-            logger.error(f"Error checking pending orders: {e}", exc_info=True)
+    
 
     def _detect_market_regime(self, prices: List[float]) -> str:
         if len(prices) < 50:
@@ -478,251 +444,7 @@ class TradingBot:
             logger.error(f"Ollama call failed: {e}")
             return '' 
     
-    def execute_strategy(self):
-        try:
-            self.get_order_summary()
-            prices, volumes = self.data_manager.load_price_history()
-            if not prices or len(prices) < 10:
-                logger.warning("Insufficient price data")
-                return
-
-            current_price, current_volume = self.trade_executor.fetch_current_price()
-            if not current_price:
-                logger.error("Failed to fetch current price")
-                return
-
-            self.price_history.append(current_price)
-            self.price_history = self.price_history[-self.lookback_period * 4:]
-
-            ohlc = self.trade_executor.get_ohlc_data(pair="BTC/EUR", interval='15m', since=int(time.time() - 7200))
-            if ohlc:
-                self.data_manager.append_ohlc_data(ohlc)
-                self.data_manager.append_ohlc_data(ohlc)
-
-            prices = [float(p) for p in prices]
-            volumes = [float(v) for v in volumes]
-            if len(prices) != len(volumes):
-                logger.error("Mismatched price and volume lengths")
-                return
-
-            # Calculate basic technical indicators
-            rsi = calculate_rsi(prices) or 0
-            macd, signal = calculate_macd(prices) or (0, 0)
-            upper_band, ma_short, lower_band = calculate_bollinger_bands(prices) or (0, 0, 0)
-            ma_long = calculate_moving_average(prices, 50) or 0
-            vwap = calculate_vwap(prices, volumes) or current_price
-            volatility = self._calculate_volatility(prices)
-            market_trend = self._detect_market_regime(prices)
-
-            # Enhanced news analysis
-            articles = fetch_enhanced_news(top_n=20)
-            news_analysis = calculate_enhanced_sentiment(articles)
-            sentiment = calculate_sentiment(articles)
-
-            # Enhanced indicators with risk adjustment
-            try:
-                enhanced_indicators = calculate_risk_adjusted_indicators(prices, volumes, news_analysis)
-            except Exception as e:
-                logger.warning(f"Enhanced indicators failed, using basic ones: {e}")
-                enhanced_indicators = {
-                    'rsi': rsi,
-                    'macd': macd,
-                    'signal': signal,
-                    'ma_short': ma_short,
-                    'ma_long': ma_long,
-                    'vwap': vwap,
-                    'correlations': {},
-                    'liquidation_signals': {},
-                    'risk_factor': 1.0
-                }
-
-            # Get on-chain signals
-            onchain_signals = self.onchain_analyzer.get_onchain_signals()
-            fee_rate = onchain_signals.get("fee_rate", 0)
-            netflow = onchain_signals.get("netflow", 0)
-            onchain_volume = onchain_signals.get("volume", 0)
-            old_utxos = onchain_signals.get("old_utxos", 0)
-
-            # Calculate additional metrics
-            dip_percentage = (ma_short - current_price) / ma_short if ma_short else 0
-            peak_price = max(self.price_history) if self.price_history else current_price
-            peak_dip_percentage = (peak_price - current_price) / peak_price if peak_price else 0
-
-            # Get balances and performance
-            btc_balance = self.trade_executor.get_total_btc_balance() or 0
-            eur_balance = self.trade_executor.get_available_balance("EUR") or 0
-
-            self.performance_tracker.update_equity(btc_balance, eur_balance, current_price)
-            performance_report = self.performance_tracker.generate_performance_report()
-            avg_buy_price = self._estimate_avg_buy_price()
-
-            # Combine all indicator data
-            indicators_data = {
-                'current_price': current_price,
-                'news_analysis': news_analysis,
-                'correlations': enhanced_indicators.get('correlations', {}),
-                'liquidation_signals': enhanced_indicators.get('liquidation_signals', {}),
-                'rsi': enhanced_indicators.get('rsi', rsi),
-                'adjusted_rsi_buy': enhanced_indicators.get('adjusted_rsi_buy', 30),
-                'adjusted_rsi_sell': enhanced_indicators.get('adjusted_rsi_sell', 70),
-                'macd': enhanced_indicators.get('macd', macd),
-                'signal': enhanced_indicators.get('signal', signal),
-                'ma_short': enhanced_indicators.get('ma_short', ma_short),
-                'ma_long': enhanced_indicators.get('ma_long', ma_long),
-                'vwap': enhanced_indicators.get('vwap', vwap),
-                'volatility': enhanced_indicators.get('risk_factor', 1) - 1,  # Convert risk factor to volatility
-                'sentiment': sentiment,
-                'fee_rate': fee_rate,
-                'netflow': netflow,
-                'onchain_volume': onchain_volume,
-                'old_utxos': old_utxos,
-                'market_trend': market_trend,
-                'dip_percentage': dip_percentage,
-                'peak_dip_percentage': peak_dip_percentage,
-                'performance_report': performance_report,
-                'avg_buy_price': avg_buy_price
-            }
-
-            logger.info(f"Indicators Data: Risk-off: {news_analysis.get('risk_off_probability', 0)*100:.0f}%, "
-                        f"RSI: {indicators_data.get('rsi', 50):.1f}, "
-                        f"Sentiment: {sentiment:.3f}, "
-                        f"Netflow: {netflow:.0f}")
-
-            # Enhanced decision making with risk override
-            action = self.enhanced_decide_action_with_risk_override(indicators_data)
-            reason = f"{action.upper()} decided by enhanced risk system"
-            logger.info(f"Decision: {action} - {reason}")
-
-            # Calculate position size
-            trade_volume = 0
-            if action in ['buy', 'sell']:
-                trade_volume = self.decide_amount(action, indicators_data, btc_balance, eur_balance)
-                if trade_volume <= 0:
-                    action = 'hold'
-                    reason = "Zero volume calculated; holding"
-
-            buy_decision = action == 'buy'
-            sell_decision = action == 'sell'
-
-            # Execute trades
-            if buy_decision:
-                if self.should_wait_for_pending_orders('buy'):
-                    buy_decision = False
-                    reason = "Waiting for pending buy orders to fill"
-                    logger.info(reason)
-                else:
-                    order_book = self.trade_executor.get_btc_order_book()
-                    optimal_price = self.trade_executor.get_optimal_price(order_book, "buy")
-                    if optimal_price:
-                        if self.order_manager:
-                            order_id = self.order_manager.place_limit_order_with_timeout(
-                                volume=trade_volume,
-                                side="buy",
-                                price=optimal_price,
-                                timeout=300,
-                                post_only=False
-                            )
-                            if order_id:
-                                self.last_trade_time = time.time()
-                                self._log_trade(datetime.now().isoformat(), optimal_price, trade_volume, "buy", reason)
-                                logger.info(f"\033[32mBuy order placed: {trade_volume:.8f} BTC at €{optimal_price}, Order ID: {order_id}\033[0m")
-                            else:
-                                reason = "Buy failed: Could not place order"
-                                buy_decision = False
-                                logger.info(reason)
-                        else:
-                            if self.trade_executor.execute_trade(trade_volume, "buy", optimal_price):
-                                self.last_trade_time = time.time()
-                                self.recent_buys.append((optimal_price, trade_volume))
-                                self.recent_buys = self.recent_buys[-10:]
-                                self._save_recent_buys()
-                                self._log_trade(datetime.now().isoformat(), optimal_price, trade_volume, "buy", reason)
-                                logger.info(f"\033[32mBuy executed: {trade_volume:.8f} BTC at €{optimal_price}\033[0m")
-                            else:
-                                reason = "Buy failed: No response"
-                                buy_decision = False
-                                logger.info(reason)
-                    else:
-                        reason = "Buy failed: No optimal price"
-                        buy_decision = False
-                        logger.info(reason)
-
-            elif sell_decision:
-                if self.should_wait_for_pending_orders('sell'):
-                    sell_decision = False
-                    reason = "Waiting for pending sell orders to fill"
-                    logger.info(reason)
-                else:
-                    order_book = self.trade_executor.get_btc_order_book()
-                    optimal_price = self.trade_executor.get_optimal_price(order_book, "sell")
-                    if optimal_price:
-                        if self.order_manager:
-                            order_id = self.order_manager.place_limit_order_with_timeout(
-                                volume=trade_volume,
-                                side="sell",
-                                price=optimal_price,
-                                timeout=300,
-                                post_only=False
-                            )
-                            if order_id:
-                                self.last_trade_time = time.time()
-                                self._log_trade(datetime.now().isoformat(), optimal_price, trade_volume, "sell", reason)
-                                logger.info(f"\033[31mSell order placed: {trade_volume:.8f} BTC at €{optimal_price}, Order ID: {order_id}\033[0m")
-                            else:
-                                reason = "Sell failed: Could not place order"
-                                sell_decision = False
-                                logger.info(reason)
-                        else:
-                            if self.trade_executor.execute_trade(trade_volume, "sell", optimal_price):
-                                self.last_trade_time = time.time()
-                                self._log_trade(datetime.now().isoformat(), optimal_price, trade_volume, "sell", reason)
-                                logger.info(f"\033[31mSell executed: {trade_volume:.8f} BTC at €{optimal_price}\033[0m")
-                            else:
-                                reason = "Sell failed: No response"
-                                sell_decision = False
-                                logger.info(reason)
-                    else:
-                        reason = "Sell failed: No optimal price"
-                        sell_decision = False
-                        logger.info(reason)
-
-            # Log risk decision for monitoring
-            self.log_risk_decision(action, indicators_data, reason)
-
-            # Log all strategy data
-            profit_margin = (current_price - avg_buy_price) / avg_buy_price if avg_buy_price else None
-            log_data = {
-                "timestamp": datetime.now().isoformat(),
-                "price": current_price,
-                "trade_volume": trade_volume,
-                "side": "buy" if buy_decision else "sell" if sell_decision else "",
-                "reason": reason,
-                "dip": dip_percentage,
-                "rsi": rsi,
-                "macd": macd,
-                "signal": signal,
-                "ma_short": ma_short,
-                "ma_long": ma_long,
-                "upper_band": upper_band,
-                "lower_band": lower_band,
-                "sentiment": sentiment,
-                "fee_rate": fee_rate,
-                "netflow": netflow,
-                "volume": onchain_volume,
-                "old_utxos": old_utxos,
-                "buy_decision": buy_decision,
-                "sell_decision": sell_decision,
-                "btc_balance": btc_balance,
-                "eur_balance": eur_balance,
-                "avg_buy_price": avg_buy_price,
-                "profit_margin": profit_margin
-            }
-            self.data_manager.log_strategy(**log_data)
-            self.last_rsi = rsi
-            self.last_sentiment = sentiment
-
-        except Exception as e:
-            logger.error(f"Strategy execution failed: {e}", exc_info=True)
+    
 
     def _log_trade(self, timestamp: str, price: float, volume: float, side: str, reason: str):
         self.data_manager.log_strategy(
@@ -745,38 +467,7 @@ class TradingBot:
             return True
         return False
 
-    def get_order_summary(self):
-        if not self.order_manager:
-            return
-        try:
-            pending = self.order_manager.get_pending_orders()
-            if pending:
-                logger.info(f"=== PENDING ORDERS ({len(pending)}) ===")
-                total_pending_buy_volume = 0
-                total_pending_sell_volume = 0
-                for order_id, order_info in pending.items():
-                    age = time.time() - order_info['timestamp']
-                    remaining = order_info['timeout'] - age
-                    logger.info(f"  {order_id}: {order_info['side'].upper()} {order_info['volume']:.8f} BTC @ €{order_info['price']:.2f} (expires in {remaining:.0f}s)")
-                    if order_info['side'] == 'buy':
-                        total_pending_buy_volume += order_info['volume']
-                    else:
-                        total_pending_sell_volume += order_info['volume']
-                logger.info(f"  Total pending: BUY {total_pending_buy_volume:.8f} BTC, SELL {total_pending_sell_volume:.8f} BTC")
-            recent_fills = self.order_manager.get_filled_orders(hours=24)
-            if recent_fills:
-                logger.info(f"=== RECENT FILLS (Last 24h: {len(recent_fills)}) ===")
-                for order_id, order_info in list(recent_fills.items())[-5:]:
-                    fill_time = datetime.fromtimestamp(order_info.get('filled_at', 0))
-                    logger.info(f"  {order_id}: {order_info['side'].upper()} {order_info.get('executed_volume', 0):.8f} BTC @ €{order_info.get('average_price', 0):.2f} at {fill_time.strftime('%H:%M:%S')}")
-            stats = self.order_manager.get_order_statistics()
-            logger.info(f"=== ORDER STATISTICS ===")
-            logger.info(f"  Fill rate: {stats['fill_rate']:.1%}")
-            logger.info(f"  Avg time to fill: {stats['avg_time_to_fill']:.0f}s")
-            logger.info(f"  Total fees paid: €{stats['total_fees_paid']:.2f}")
-            logger.info(f"  Total orders: {stats['total_filled_orders']} filled, {stats['total_cancelled_orders']} cancelled")
-        except Exception as e:
-            logger.error(f"Error getting order summary: {e}")
+    
 
     def log_risk_decision(self, action: str, indicators_data: Dict, reasoning: str):
         """
@@ -952,3 +643,646 @@ class TradingBot:
             print(f"\nLatest Decision: {latest['action'].upper()} at {latest['timestamp']}")
             print(f"Reasoning: {latest['reasoning']}")
         print("===========================\n")
+
+    def _load_trade_session(self):
+        """Load daily trade count and session data"""
+        try:
+            if os.path.exists(self.trade_session_file):
+                with open(self.trade_session_file, 'r') as f:
+                    session_data = json.load(f)
+                    
+                session_date = datetime.fromisoformat(session_data.get('date', '1970-01-01')).date()
+                if session_date == datetime.now().date():
+                    self.daily_trade_count = session_data.get('daily_trade_count', 0)
+                    logger.info(f"Loaded session: {self.daily_trade_count} trades today")
+                else:
+                    logger.info("New trading day started, resetting counters")
+                    self.daily_trade_count = 0
+                    self._save_trade_session()
+        except Exception as e:
+            logger.error(f"Failed to load trade session: {e}")
+            self.daily_trade_count = 0
+
+    def _save_trade_session(self):
+        """Save daily trade count and session data"""
+        try:
+            session_data = {
+                'date': datetime.now().date().isoformat(),
+                'daily_trade_count': self.daily_trade_count,
+                'last_updated': datetime.now().isoformat()
+            }
+            with open(self.trade_session_file, 'w') as f:
+                json.dump(session_data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save trade session: {e}")
+
+    def _reset_daily_counters_if_needed(self):
+        """Reset daily counters if it's a new day"""
+        current_date = datetime.now().date()
+        if current_date != self.last_daily_reset:
+            logger.info("New trading day - resetting daily counters")
+            self.daily_trade_count = 0
+            self.last_daily_reset = current_date
+            self._save_trade_session()
+
+    def check_pending_orders(self):
+        """Enhanced order checking with better trade recording"""
+        if not self.order_manager:
+            return
+            
+        try:
+            self._reset_daily_counters_if_needed()
+            
+            logger.debug("Checking pending orders...")
+            results = self.order_manager.check_and_update_orders()
+            
+            # Process filled orders
+            if results['filled']:
+                logger.info(f"🎯 Orders FILLED: {results['filled']}")
+                
+                for order_id in results['filled']:
+                    order_info = self.order_manager.filled_orders.get(order_id)
+                    if order_info:
+                        # Record in performance tracker
+                        self.performance_tracker.record_trade(
+                            order_id=order_id,
+                            side=order_info['side'],
+                            volume=order_info.get('executed_volume', order_info['volume']),
+                            price=order_info.get('average_price', order_info['price']),
+                            fee=order_info.get('fee', 0),
+                            timestamp=order_info.get('filled_at', time.time())
+                        )
+                        
+                        # Update daily counter
+                        self.daily_trade_count += 1
+                        self._save_trade_session()
+                        
+                        # Update recent buys for profit calculation
+                        if order_info['side'] == 'buy':
+                            self.recent_buys.append((
+                                order_info.get('average_price', order_info['price']),
+                                order_info.get('executed_volume', order_info['volume'])
+                            ))
+                            self.recent_buys = self.recent_buys[-10:]  # Keep last 10
+                            self._save_recent_buys()
+                            
+                            logger.info(f"✅ Buy recorded: {order_info.get('executed_volume', 0):.8f} BTC @ €{order_info.get('average_price', 0):.2f}")
+                            
+                        elif order_info['side'] == 'sell':
+                            # Calculate and log profit
+                            avg_buy_price = self._estimate_avg_buy_price()
+                            if avg_buy_price:
+                                profit_pct = (order_info.get('average_price', 0) - avg_buy_price) / avg_buy_price * 100
+                                logger.info(f"💰 Sell completed with {profit_pct:.2f}% profit")
+                            
+                            logger.info(f"✅ Sell recorded: {order_info.get('executed_volume', 0):.8f} BTC @ €{order_info.get('average_price', 0):.2f}")
+                        
+                        # Log the trade in our detailed logs
+                        self._log_completed_trade(order_info)
+            
+            # Log other order states
+            if results['cancelled']:
+                logger.info(f"❌ Orders CANCELLED: {results['cancelled']}")
+                
+            if results['partial']:
+                logger.info(f"📊 Orders PARTIALLY filled: {results['partial']}")
+                for order_id in results['partial']:
+                    if order_id in self.order_manager.pending_orders:
+                        order_info = self.order_manager.pending_orders[order_id]
+                        executed = order_info.get('executed_volume', 0)
+                        total = order_info['volume']
+                        pct_filled = (executed / total * 100) if total > 0 else 0
+                        logger.info(f"  {order_id}: {executed:.8f}/{total:.8f} BTC ({pct_filled:.1f}% filled)")
+                        
+        except Exception as e:
+            logger.error(f"Error checking pending orders: {e}", exc_info=True)
+
+    def _log_completed_trade(self, order_info: Dict):
+        """Log completed trade with full details"""
+        try:
+            trade_details = {
+                'timestamp': datetime.now().isoformat(),
+                'order_id': order_info['id'],
+                'side': order_info['side'],
+                'volume': order_info.get('executed_volume', order_info['volume']),
+                'price': order_info.get('average_price', order_info['price']),
+                'fee': order_info.get('fee', 0),
+                'total_value': order_info.get('executed_volume', order_info['volume']) * order_info.get('average_price', order_info['price']),
+                'fill_time_seconds': order_info.get('filled_at', 0) - order_info.get('timestamp', 0),
+                'daily_trade_number': self.daily_trade_count
+            }
+            
+            # Log to our main data manager
+            self.data_manager.log_strategy(
+                timestamp=trade_details['timestamp'],
+                price=trade_details['price'],
+                trade_volume=trade_details['volume'],
+                side=trade_details['side'],
+                reason=f"ORDER_FILLED: {order_info['id']}",
+                buy_decision=trade_details['side'] == 'buy',
+                sell_decision=trade_details['side'] == 'sell'
+            )
+            
+            logger.info(f"📝 Trade logged: {trade_details['side'].upper()} #{trade_details['daily_trade_number']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to log completed trade: {e}")
+
+    def get_order_summary(self):
+        """Enhanced order summary with better statistics"""
+        if not self.order_manager:
+            logger.info("No order manager available")
+            return
+            
+        try:
+            # Current pending orders
+            pending = self.order_manager.get_pending_orders()
+            if pending:
+                logger.info(f"=== PENDING ORDERS ({len(pending)}) ===")
+                total_buy_volume = 0
+                total_sell_volume = 0
+                total_buy_value = 0
+                total_sell_value = 0
+                
+                for order_id, order_info in pending.items():
+                    age = time.time() - order_info['timestamp']
+                    remaining = max(0, order_info['timeout'] - age)
+                    executed = order_info.get('executed_volume', 0)
+                    total = order_info['volume']
+                    value = total * order_info['price']
+                    
+                    status_indicator = "🟡" if executed == 0 else "🔵"  # Yellow for new, blue for partial
+                    
+                    logger.info(f"  {status_indicator} {order_id}: {order_info['side'].upper()} "
+                              f"{total:.8f} BTC @ €{order_info['price']:.2f} "
+                              f"(€{value:.2f}) - expires in {remaining:.0f}s")
+                    
+                    if executed > 0:
+                        pct_filled = (executed / total * 100) if total > 0 else 0
+                        logger.info(f"    📊 Partially filled: {executed:.8f} BTC ({pct_filled:.1f}%)")
+                    
+                    if order_info['side'] == 'buy':
+                        total_buy_volume += total
+                        total_buy_value += value
+                    else:
+                        total_sell_volume += total
+                        total_sell_value += value
+                
+                logger.info(f"  📊 Total pending: BUY {total_buy_volume:.8f} BTC (€{total_buy_value:.2f}), "
+                          f"SELL {total_sell_volume:.8f} BTC (€{total_sell_value:.2f})")
+            
+            # Recent filled orders
+            recent_fills = self.order_manager.get_filled_orders(hours=24)
+            if recent_fills:
+                logger.info(f"=== RECENT FILLS (Last 24h: {len(recent_fills)}) ===")
+                total_buy_volume = 0
+                total_sell_volume = 0
+                total_fees = 0
+                
+                # Show last 5 fills
+                recent_items = list(recent_fills.items())[-5:]
+                for order_id, order_info in recent_items:
+                    fill_time = datetime.fromtimestamp(order_info.get('filled_at', 0))
+                    executed_vol = order_info.get('executed_volume', order_info['volume'])
+                    avg_price = order_info.get('average_price', order_info['price'])
+                    fee = order_info.get('fee', 0)
+                    value = executed_vol * avg_price
+                    
+                    side_indicator = "🟢" if order_info['side'] == 'buy' else "🔴"
+                    
+                    logger.info(f"  {side_indicator} {order_info['side'].upper()} {executed_vol:.8f} BTC @ "
+                              f"€{avg_price:.2f} (€{value:.2f}) at {fill_time.strftime('%H:%M:%S')}")
+                    
+                    if order_info['side'] == 'buy':
+                        total_buy_volume += executed_vol
+                    else:
+                        total_sell_volume += executed_vol
+                    total_fees += fee
+                
+                logger.info(f"  📊 24h totals: BUY {total_buy_volume:.8f} BTC, SELL {total_sell_volume:.8f} BTC")
+                logger.info(f"  💸 24h fees: €{total_fees:.4f}")
+            
+            # Order statistics
+            stats = self.order_manager.get_order_statistics()
+            logger.info(f"=== ORDER STATISTICS ===")
+            logger.info(f"  📈 Fill rate: {stats['fill_rate']:.1%}")
+            logger.info(f"  ⏱️  Avg fill time: {stats['avg_time_to_fill']:.0f}s")
+            logger.info(f"  💰 Total fees paid: €{stats['total_fees_paid']:.4f}")
+            logger.info(f"  📊 Total orders: {stats['total_filled_orders']} filled, {stats['total_cancelled_orders']} cancelled")
+            logger.info(f"  🔄 Today's trades: {self.daily_trade_count}")
+            
+            # Recent trade count verification
+            recent_count = self.order_manager.get_recent_trade_count(24)
+            if recent_count != len(recent_fills):
+                logger.warning(f"⚠️ Trade count mismatch: recent_count={recent_count}, recent_fills={len(recent_fills)}")
+            
+        except Exception as e:
+            logger.error(f"Error generating order summary: {e}")
+
+    def execute_strategy(self):
+        """Enhanced strategy execution with better error handling and logging"""
+        try:
+            # Reset daily counters if needed
+            self._reset_daily_counters_if_needed()
+            
+            # Check pending orders first
+            self.check_pending_orders()
+            
+            # Get order summary for context
+            self.get_order_summary()
+            
+            # Load price data
+            prices, volumes = self.data_manager.load_price_history()
+            if not prices or len(prices) < 10:
+                logger.warning("Insufficient price data for strategy execution")
+                return
+
+            # Get current market data
+            current_price, current_volume = self.trade_executor.fetch_current_price()
+            if not current_price:
+                logger.error("Failed to fetch current price")
+                return
+
+            # Update price history
+            self.price_history.append(current_price)
+            self.price_history = self.price_history[-self.lookback_period * 4:]
+
+            # Fetch fresh OHLC data
+            ohlc = self.trade_executor.get_ohlc_data(pair="BTC/EUR", interval='15m', since=int(time.time() - 7200))
+            if ohlc:
+                added_candles = self.data_manager.append_ohlc_data(ohlc)
+                logger.debug(f"Added {added_candles} new OHLC candles")
+
+            # Prepare data for analysis
+            prices = [float(p) for p in prices]
+            volumes = [float(v) for v in volumes]
+            
+            if len(prices) != len(volumes):
+                logger.error(f"Price/volume length mismatch: {len(prices)} vs {len(volumes)}")
+                return
+
+            # Calculate technical indicators
+            rsi = calculate_rsi(prices) or 50
+            macd, signal = calculate_macd(prices) or (0, 0)
+            upper_band, ma_short, lower_band = calculate_bollinger_bands(prices) or (current_price, current_price, current_price)
+            ma_long = calculate_moving_average(prices, 50) or current_price
+            vwap = calculate_vwap(prices, volumes) or current_price
+            volatility = self._calculate_volatility(prices)
+            market_trend = self._detect_market_regime(prices)
+
+            # Enhanced news and sentiment analysis
+            try:
+                articles = fetch_enhanced_news(top_n=20)
+                news_analysis = calculate_enhanced_sentiment(articles)
+                sentiment = news_analysis.get('sentiment', 0)
+                
+                logger.info(f"📰 News analysis: {news_analysis.get('total_articles', 0)} articles, "
+                          f"sentiment: {sentiment:.3f}, risk-off: {news_analysis.get('risk_off_probability', 0)*100:.0f}%")
+            except Exception as e:
+                logger.warning(f"News analysis failed: {e}")
+                news_analysis = {'sentiment': 0, 'risk_off_probability': 0, 'macro_weight': 1.0}
+                sentiment = 0
+
+            # Enhanced risk-adjusted indicators
+            try:
+                enhanced_indicators = calculate_risk_adjusted_indicators(prices, volumes, news_analysis)
+            except Exception as e:
+                logger.warning(f"Enhanced indicators failed, using basic ones: {e}")
+                enhanced_indicators = {
+                    'rsi': rsi, 'macd': macd, 'signal': signal,
+                    'ma_short': ma_short, 'ma_long': ma_long, 'vwap': vwap,
+                    'correlations': {}, 'liquidation_signals': {}, 'risk_factor': 1.0
+                }
+
+            # Get on-chain signals
+            try:
+                onchain_signals = self.onchain_analyzer.get_onchain_signals()
+            except Exception as e:
+                logger.warning(f"On-chain analysis failed: {e}")
+                onchain_signals = {"fee_rate": 0, "netflow": 0, "volume": 0, "old_utxos": 0}
+
+            # Get current balances
+            btc_balance = self.trade_executor.get_total_btc_balance() or 0
+            eur_balance = self.trade_executor.get_available_balance("EUR") or 0
+
+            # Update performance tracking
+            self.performance_tracker.update_equity(btc_balance, eur_balance, current_price)
+            performance_report = self.performance_tracker.generate_performance_report()
+            avg_buy_price = self._estimate_avg_buy_price()
+
+            # Prepare comprehensive indicators data
+            indicators_data = {
+                'current_price': current_price,
+                'news_analysis': news_analysis,
+                'correlations': enhanced_indicators.get('correlations', {}),
+                'liquidation_signals': enhanced_indicators.get('liquidation_signals', {}),
+                'rsi': enhanced_indicators.get('rsi', rsi),
+                'macd': enhanced_indicators.get('macd', macd),
+                'signal': enhanced_indicators.get('signal', signal),
+                'ma_short': enhanced_indicators.get('ma_short', ma_short),
+                'ma_long': enhanced_indicators.get('ma_long', ma_long),
+                'vwap': enhanced_indicators.get('vwap', vwap),
+                'upper_band': upper_band,
+                'lower_band': lower_band,
+                'volatility': volatility,
+                'sentiment': sentiment,
+                'fee_rate': onchain_signals.get("fee_rate", 0),
+                'netflow': onchain_signals.get("netflow", 0),
+                'onchain_volume': onchain_signals.get("volume", 0),
+                'old_utxos': onchain_signals.get("old_utxos", 0),
+                'market_trend': market_trend,
+                'performance_report': performance_report,
+                'avg_buy_price': avg_buy_price
+            }
+
+            # Store current indicators for metrics
+            self.last_rsi = indicators_data['rsi']
+            self.last_sentiment = sentiment
+
+            # Log current market state
+            logger.info(f"💹 MARKET STATE: Price=€{current_price:.0f}, RSI={indicators_data['rsi']:.1f}, "
+                       f"Sentiment={sentiment:.3f}, Risk-off={news_analysis.get('risk_off_probability', 0)*100:.0f}%, "
+                       f"Trend={market_trend}")
+
+            # Enhanced decision making
+            action = self.enhanced_decide_action_with_risk_override(indicators_data)
+            reason = f"{action.upper()} decision from enhanced risk system"
+
+            # Calculate position size if trading
+            trade_volume = 0
+            if action in ['buy', 'sell']:
+                trade_volume = self.calculate_risk_adjusted_position_size(action, indicators_data, btc_balance, eur_balance)
+                
+                if trade_volume <= self.min_trade_volume:
+                    action = 'hold'
+                    reason = f"Position size too small ({trade_volume:.8f} < {self.min_trade_volume:.8f})"
+                    logger.info(reason)
+
+            # Check trading limits
+            if action != 'hold' and self.daily_trade_count >= self.max_daily_trades:
+                action = 'hold'
+                reason = f"Daily trade limit reached ({self.daily_trade_count}/{self.max_daily_trades})"
+                logger.info(reason)
+
+            # Execute trading decision
+            execution_result = self._execute_trading_decision(action, trade_volume, reason, indicators_data)
+            
+            # Log strategy execution
+            self._log_strategy_execution(action, trade_volume, reason, indicators_data, execution_result)
+
+            logger.info(f"🎯 Strategy execution complete: {action.upper()} - {reason}")
+
+        except Exception as e:
+            logger.error(f"Strategy execution failed: {e}", exc_info=True)
+
+    def _execute_trading_decision(self, action: str, trade_volume: float, reason: str, indicators_data: Dict) -> Dict:
+        """Execute the trading decision with comprehensive error handling"""
+        execution_result = {
+            'executed': False,
+            'order_id': None,
+            'price': None,
+            'reason': reason
+        }
+
+        if action == 'hold':
+            execution_result['executed'] = True
+            execution_result['reason'] = reason
+            return execution_result
+
+        try:
+            # Check for pending orders of the same side
+            if self.should_wait_for_pending_orders(action):
+                execution_result['reason'] = f"Waiting for pending {action} orders"
+                logger.info(execution_result['reason'])
+                return execution_result
+
+            # Get order book and optimal price
+            order_book = self.trade_executor.get_btc_order_book()
+            if not order_book:
+                execution_result['reason'] = f"{action} failed: No order book available"
+                logger.error(execution_result['reason'])
+                return execution_result
+
+            optimal_price = self.trade_executor.get_optimal_price(order_book, action)
+            if not optimal_price:
+                execution_result['reason'] = f"{action} failed: No optimal price found"
+                logger.error(execution_result['reason'])
+                return execution_result
+
+            execution_result['price'] = optimal_price
+
+            # Execute the trade
+            if self.order_manager:
+                # Use order manager for limit orders
+                order_id = self.order_manager.place_limit_order_with_timeout(
+                    volume=trade_volume,
+                    side=action,
+                    price=optimal_price,
+                    timeout=300,
+                    post_only=False
+                )
+
+                if order_id:
+                    execution_result['executed'] = True
+                    execution_result['order_id'] = order_id
+                    execution_result['reason'] = f"{action} order placed successfully"
+                    
+                    self.last_trade_time = time.time()
+                    
+                    logger.info(f"✅ {action.upper()} order placed: {trade_volume:.8f} BTC at €{optimal_price:.2f}, ID: {order_id}")
+                else:
+                    execution_result['reason'] = f"{action} failed: Could not place order"
+                    logger.error(execution_result['reason'])
+            else:
+                # Direct execution fallback
+                if self.trade_executor.execute_trade(trade_volume, action, optimal_price):
+                    execution_result['executed'] = True
+                    execution_result['reason'] = f"{action} executed directly"
+                    
+                    self.last_trade_time = time.time()
+                    self.daily_trade_count += 1
+                    self._save_trade_session()
+                    
+                    # Update recent buys for tracking
+                    if action == 'buy':
+                        self.recent_buys.append((optimal_price, trade_volume))
+                        self.recent_buys = self.recent_buys[-10:]
+                        self._save_recent_buys()
+                    
+                    logger.info(f"✅ {action.upper()} executed directly: {trade_volume:.8f} BTC at €{optimal_price:.2f}")
+                else:
+                    execution_result['reason'] = f"{action} failed: Direct execution failed"
+                    logger.error(execution_result['reason'])
+
+        except Exception as e:
+            execution_result['reason'] = f"{action} failed: {str(e)}"
+            logger.error(f"Trade execution error: {e}", exc_info=True)
+
+        return execution_result
+
+    def _log_strategy_execution(self, action: str, trade_volume: float, reason: str, 
+                              indicators_data: Dict, execution_result: Dict):
+        """Log comprehensive strategy execution details"""
+        try:
+            current_price = indicators_data.get('current_price', 0)
+            avg_buy_price = indicators_data.get('avg_buy_price', 0)
+            profit_margin = None
+            
+            if avg_buy_price and avg_buy_price > 0:
+                profit_margin = (current_price - avg_buy_price) / avg_buy_price
+
+            # Get current balances
+            btc_balance = self.trade_executor.get_total_btc_balance() or 0
+            eur_balance = self.trade_executor.get_available_balance("EUR") or 0
+
+            log_data = {
+                "timestamp": datetime.now().isoformat(),
+                "price": current_price,
+                "trade_volume": trade_volume if execution_result['executed'] and action != 'hold' else 0,
+                "side": action if execution_result['executed'] and action != 'hold' else "",
+                "reason": execution_result['reason'],
+                "dip": (indicators_data.get('ma_short', current_price) - current_price) / indicators_data.get('ma_short', current_price) if indicators_data.get('ma_short') else 0,
+                "rsi": indicators_data.get('rsi', 50),
+                "macd": indicators_data.get('macd', 0),
+                "signal": indicators_data.get('signal', 0),
+                "ma_short": indicators_data.get('ma_short', current_price),
+                "ma_long": indicators_data.get('ma_long', current_price),
+                "upper_band": indicators_data.get('upper_band', current_price),
+                "lower_band": indicators_data.get('lower_band', current_price),
+                "sentiment": indicators_data.get('sentiment', 0),
+                "fee_rate": indicators_data.get('fee_rate', 0),
+                "netflow": indicators_data.get('netflow', 0),
+                "volume": indicators_data.get('onchain_volume', 0),
+                "old_utxos": indicators_data.get('old_utxos', 0),
+                "buy_decision": action == 'buy' and execution_result['executed'],
+                "sell_decision": action == 'sell' and execution_result['executed'],
+                "btc_balance": btc_balance,
+                "eur_balance": eur_balance,
+                "avg_buy_price": avg_buy_price,
+                "profit_margin": profit_margin
+            }
+
+            self.data_manager.log_strategy(**log_data)
+            
+            # Log risk decision
+            self.log_risk_decision(action, indicators_data, execution_result['reason'])
+
+        except Exception as e:
+            logger.error(f"Failed to log strategy execution: {e}")
+
+    def get_trading_status_summary(self) -> Dict:
+        """Get comprehensive trading status for monitoring"""
+        try:
+            # Get current balances
+            btc_balance = self.trade_executor.get_total_btc_balance() or 0
+            eur_balance = self.trade_executor.get_available_balance("EUR") or 0
+            current_price, _ = self.trade_executor.fetch_current_price()
+            
+            # Calculate portfolio value
+            total_value = eur_balance + (btc_balance * (current_price or 0))
+            
+            # Get order statistics
+            order_stats = self.order_manager.get_order_statistics() if self.order_manager else {}
+            
+            # Get performance report
+            performance = self.performance_tracker.generate_performance_report()
+            
+            # Get recent trades
+            recent_trades = self.order_manager.get_recent_trade_count(24) if self.order_manager else 0
+            
+            status = {
+                'timestamp': datetime.now().isoformat(),
+                'balances': {
+                    'btc': btc_balance,
+                    'eur': eur_balance,
+                    'total_value_eur': total_value,
+                    'current_btc_price': current_price or 0
+                },
+                'trading': {
+                    'daily_trades': self.daily_trade_count,
+                    'recent_trades_24h': recent_trades,
+                    'max_daily_trades': self.max_daily_trades,
+                    'last_trade_time': self.last_trade_time
+                },
+                'orders': {
+                    'pending_count': len(self.order_manager.get_pending_orders()) if self.order_manager else 0,
+                    'fill_rate': order_stats.get('fill_rate', 0),
+                    'total_fees': order_stats.get('total_fees_paid', 0)
+                },
+                'performance': performance,
+                'indicators': {
+                    'last_rsi': getattr(self, 'last_rsi', 0),
+                    'last_sentiment': getattr(self, 'last_sentiment', 0)
+                }
+            }
+            
+            return status
+            
+        except Exception as e:
+            logger.error(f"Failed to generate status summary: {e}")
+            return {'error': str(e), 'timestamp': datetime.now().isoformat()}
+
+    def print_trading_status(self):
+        """Print a comprehensive trading status report"""
+        try:
+            status = self.get_trading_status_summary()
+            
+            print("\n" + "="*60)
+            print("🤖 BITCOIN TRADING BOT STATUS")
+            print("="*60)
+            
+            if 'error' in status:
+                print(f"❌ Error: {status['error']}")
+                return
+            
+            # Balances
+            balances = status['balances']
+            print(f"💰 Portfolio:")
+            print(f"  BTC: {balances['btc']:.8f}")
+            print(f"  EUR: €{balances['eur']:.2f}")
+            print(f"  Total Value: €{balances['total_value_eur']:.2f}")
+            print(f"  BTC Price: €{balances['current_btc_price']:.2f}")
+            
+            # Trading activity
+            trading = status['trading']
+            print(f"\n📊 Trading Activity:")
+            print(f"  Today's Trades: {trading['daily_trades']}/{trading['max_daily_trades']}")
+            print(f"  24h Trades: {trading['recent_trades_24h']}")
+            if trading['last_trade_time'] > 0:
+                last_trade = datetime.fromtimestamp(trading['last_trade_time'])
+                print(f"  Last Trade: {last_trade.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Orders
+            orders = status['orders']
+            print(f"\n📋 Orders:")
+            print(f"  Pending: {orders['pending_count']}")
+            print(f"  Fill Rate: {orders['fill_rate']:.1%}")
+            print(f"  Total Fees: €{orders['total_fees']:.4f}")
+            
+            # Performance
+            perf = status['performance']
+            if 'returns' in perf:
+                print(f"\n📈 Performance:")
+                print(f"  24h Return: {perf['returns']['24h']}")
+                print(f"  7d Return: {perf['returns']['7d']}")
+                print(f"  Total Return: {perf['returns']['total']}")
+                
+                if 'risk_metrics' in perf:
+                    risk = perf['risk_metrics']
+                    print(f"  Win Rate: {risk['win_rate']}")
+                    print(f"  Sharpe Ratio: {risk['sharpe_ratio']}")
+                    print(f"  Max Drawdown: {risk['max_drawdown']}")
+            
+            # Technical indicators
+            indicators = status['indicators']
+            print(f"\n📊 Last Indicators:")
+            print(f"  RSI: {indicators['last_rsi']:.1f}")
+            print(f"  Sentiment: {indicators['last_sentiment']:.3f}")
+            
+            print("="*60 + "\n")
+            
+        except Exception as e:
+            logger.error(f"Failed to print trading status: {e}")
+            print(f"❌ Failed to generate status report: {e}")
+
+# Usage improvements for main.py
