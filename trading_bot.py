@@ -13,8 +13,10 @@ from onchain_analyzer import OnChainAnalyzer
 from config import GLOBAL_TRADE_COOLDOWN, BOT_LOGS_FILE, BITVAVO_CONFIG
 from logger_config import logger
 from performance_tracker import PerformanceTracker
-from metrics_server import MetricsServer
+# from metrics_server import MetricsServer
 import requests
+
+
 
 class TradingBot:
     def __init__(self, data_manager: DataManager, trade_executor: TradeExecutor, onchain_analyzer: OnChainAnalyzer, order_manager: OrderManager = None):
@@ -41,8 +43,8 @@ class TradingBot:
         self.price_history = []
         self._initialize_price_history()
         self.start_time = time.time()
-        self.metrics_server = MetricsServer(self)
-        self.metrics_server.start()
+        # self.metrics_server = MetricsServer(self)
+        # self.metrics_server.start()
         self.ollama_url = "http://localhost:11434/api/generate"  # Assuming Ollama runs locally
         self.model_name = "gemma3:4b"
         self.last_rsi = 0
