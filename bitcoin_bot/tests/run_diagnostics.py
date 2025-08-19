@@ -374,6 +374,40 @@ def generate_recommendations():
     for rec in recommendations:
         print(rec)
 
+def test_performance_tracker():
+    """Test the performance tracker independently"""
+    try:
+        from performance_tracker import PerformanceTracker
+        
+        # Test initialization
+        tracker = PerformanceTracker(0.008, 45.0)
+        print("✅ Performance tracker created")
+        
+        # Test recording a trade
+        tracker.record_trade(
+            order_id="test_001",
+            side="buy",
+            volume=0.001,
+            price=96900.0,
+            fee=0.24
+        )
+        print("✅ Trade recorded")
+        
+        # Test equity update
+        tracker.update_equity(0.009, 42.0, 96900.0)
+        print("✅ Equity updated")
+        
+        # Test report generation
+        report = tracker.generate_performance_report()
+        print("✅ Report generated")
+        print(f"Current equity: {report['equity']['current']}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Performance tracker test failed: {e}")
+        return False
+
 
 def main():
     """Run complete diagnostic check"""
@@ -389,6 +423,7 @@ def main():
         ("Bot Logs", analyze_bot_logs),
         ("Recent Buys", analyze_recent_buys),
         ("Order Manager State", check_order_manager_state),
+        ("Performance Tracker", test_performance_tracker),
     ]
 
     results = {}

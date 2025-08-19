@@ -139,6 +139,9 @@ class UnifiedTradingBot:
         self.running = False
         self.last_update = time.time()
 
+        self._performance_tracker = None
+        self._init_performance_tracker()
+
         logger.info("Unified trading bot initialized successfully")
 
 
@@ -588,6 +591,26 @@ class UnifiedTradingBot:
                     # Update performance tracking
                     self.total_trades += 1
 
+                    # Record trade in performance tracker
+                    if self._performance_tracker:
+                        try:
+                            order_id = f"trade_{int(time.time())}"
+                            fee = signal.price * signal.volume * 0.0025  # Bitvavo fee
+                            
+                            self._performance_tracker.record_trade(
+                                order_id=order_id,
+                                side=signal.action.value,
+                                volume=signal.volume,
+                                price=signal.price,
+                                fee=fee,
+                                timestamp=time.time()
+                            )
+                            
+                            logger.info(f"📊 Trade recorded in performance tracker")
+                            
+                        except Exception as e:
+                            logger.warning(f"Failed to record trade in performance tracker: {e}")
+
                     # Update ML model with new data if available
                     if self.ml_engine and signal.action != TradingAction.HOLD:
                         try:
@@ -621,6 +644,21 @@ class UnifiedTradingBot:
                 )
 
             # Update equity tracking
+            if self._performance_tracker:
+                try:
+                    btc_balance = self.trade_executor.get_total_btc_balance() or 0
+                    eur_balance = self.trade_executor.get_available_balance("EUR") or 0
+                    current_price = indicators.current_price
+                    
+                    self._performance_tracker.update_equity(btc_balance, eur_balance, current_price)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to update equity tracking: {e}")
+            
+            
+        except Exception as e:
+            logger.error(f"Unified strategy execution failed: {e}", exc_info=True)
+    
             self.core_bot._update_equity_tracking(indicators.current_price)
 
             self.last_update = time.time()
@@ -652,6 +690,14 @@ class UnifiedTradingBot:
                 "strategy_count": len(self.strategies),
             },
         }
+
+        if self._performance_tracker:
+            try:
+                performance_report = self._performance_tracker.generate_performance_report()
+                unified_status['performance'] = performance_report
+            except Exception as e:
+                logger.warning(f"Failed to generate performance report: {e}")
+                unified_status['performance'] = {'error': str(e)}
 
         # Add ML performance if available
         if self.ml_engine:
@@ -741,6 +787,23 @@ class UnifiedTradingBot:
                     print(f"   🕰️ Old UTXOs: {signals.get('old_utxos', 0)} moving")
                 except Exception as e:
                     print(f"   ❌ OnChain data error: {e}")
+
+             # Add performance section
+            if self._performance_tracker and 'performance' in status:
+                perf = status['performance']
+                print(f"\n📊 PERFORMANCE METRICS:")
+                
+                if 'error' not in perf:
+                    print(f"   💰 Current Equity: {perf['equity']['current']}")
+                    print(f"   📈 24h Return: {perf['returns']['24h']}")
+                    print(f"   📅 7d Return: {perf['returns']['7d']}")
+                    print(f"   🎯 Total Return: {perf['returns']['total']}")
+                    print(f"   📊 Sharpe Ratio: {perf['risk_metrics']['sharpe_ratio']}")
+                    print(f"   📉 Max Drawdown: {perf['risk_metrics']['max_drawdown']}")
+                    print(f"   🎲 Win Rate: {perf['risk_metrics']['win_rate']}")
+                    print(f"   💸 Total Fees: €{perf['trade_stats']['total_fees']:.2f}")
+                else:
+                    print(f"   ❌ Performance data error: {perf['error']}")
 
             print(f"{'='*80}\n")
 

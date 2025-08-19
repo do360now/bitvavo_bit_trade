@@ -15,6 +15,9 @@ from datetime import datetime
 from unified_bot import UnifiedTradingBot
 from bitvavo_api import authenticate_exchange, test_connection
 
+from tests.run_diagnostics import  test_performance_tracker
+   
+
 # Try to import from your actual file structure
 try:
     from core.bot import BotConfiguration
@@ -74,6 +77,13 @@ class TradingBotManager:
                 min_confidence_threshold=0.6,
             )
 
+            # Test performance tracker before starting
+            logger.info("🧪 Testing performance tracker...")
+            if test_performance_tracker():
+                logger.info("✅ Performance tracker test passed")
+            else:
+                logger.warning("⚠️ Performance tracker test failed - will run without it")
+            
             # Check if Bitcoin node is available
             onchain_enabled = self._check_bitcoin_node_available()
 

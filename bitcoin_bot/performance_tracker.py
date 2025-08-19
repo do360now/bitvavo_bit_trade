@@ -2,7 +2,14 @@ import json
 import numpy as np
 from typing import Dict
 from datetime import datetime
-from utils.logger import logger
+try:
+    from utils.logger import logger
+except ImportError:
+    try:
+        from utils.logger import logger
+    except ImportError:
+        import logging
+        logger = logging.getLogger(__name__)
 
 
 class PerformanceTracker:

@@ -2,7 +2,7 @@
 import time
 from typing import Dict
 from bitcoinrpc.authproxy import AuthServiceProxy
-from config import (
+from utils.config import (
     RPC_HOST,
     RPC_PORT,
     RPC_USER,
@@ -11,7 +11,7 @@ from config import (
     EXCHANGE_ADDRESSES,
     ONCHAIN_CACHE_DURATION,
 )
-from logger_config import logger
+from utils.logger import logger
 
 
 class OnChainAnalyzer:
