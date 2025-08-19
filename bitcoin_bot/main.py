@@ -11,6 +11,7 @@ import traceback
 import os
 from datetime import datetime
 
+
 # Import the unified bot and supporting modules
 from unified_bot import UnifiedTradingBot
 from bitvavo_api import authenticate_exchange, test_connection, OnChainAnalyzer
@@ -22,14 +23,14 @@ except ImportError:
     from core.bot import BotConfiguration
 
 try:
-    from config import PRICE_HISTORY_FILE, BOT_LOGS_FILE
+    from utils.config import PRICE_HISTORY_FILE, BOT_LOGS_FILE
 except ImportError:
     # Fallback values if config import fails
     PRICE_HISTORY_FILE = "./price_history.json"
     BOT_LOGS_FILE = "./bot_logs.csv"
 
 try:
-    from logger_config import logger
+    from utils.logger import logger
 except ImportError:
     import logging
     logging.basicConfig(level=logging.INFO)
@@ -245,6 +246,8 @@ class TradingBotManager:
             logger.info(f"⏱️ Total runtime: {total_runtime/3600:.2f} hours ({self.iteration_count} iterations)")
             
             logger.info("✅ Graceful shutdown completed")
+            sys.exit(0)
+            
             
         except Exception as e:
             logger.error(f"Error during shutdown: {e}", exc_info=True)

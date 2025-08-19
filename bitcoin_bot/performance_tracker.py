@@ -2,7 +2,7 @@ import json
 import numpy as np
 from typing import List, Dict
 from datetime import datetime, timedelta
-from logger_config import logger
+from utils.logger import logger
 
 
 class PerformanceTracker:
