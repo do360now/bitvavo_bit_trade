@@ -8,7 +8,7 @@ test_timestamps = [
     1754220600,
     1754221500,
     1754222400,
-    1754223300
+    1754223300,
 ]
 
 current_time = int(time.time())
