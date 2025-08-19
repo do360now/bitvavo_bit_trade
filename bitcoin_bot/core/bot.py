@@ -57,10 +57,13 @@ class MarketIndicators:
     ml_success_probability: Optional[float] = None
     peak_probability: Optional[float] = None
     peak_recommendation: Optional[str] = None
+    # OnChain indicators
     netflow: float = 0.0
     fee_rate: float = 0.0
+    onchain_volume: float = 0.0
+    old_utxos: float = 0.0
+    
     market_regime: str = "ranging"
-
 
 @dataclass
 class TradingSignal:
@@ -86,7 +89,7 @@ class BotConfiguration:
     # Feature flags
     enable_ml: bool = True
     enable_peak_detection: bool = True
-    enable_onchain_analysis: bool = False
+    enable_onchain_analysis: bool = True
     enable_news_sentiment: bool = True
 
     # Trading parameters
@@ -699,16 +702,34 @@ class TradingBot:
                 f"High ML confidence: {indicators.ml_success_probability:.1%}"
             )
 
-        # On-chain
-        if indicators.netflow < -5000:
-            score += 1
-            reasons.append(f"Strong accumulation: {indicators.netflow:.0f}")
-
-        # Market regime
-        if indicators.market_regime == "uptrend":
-            score += 0.5
-            reasons.append("Uptrend regime")
-
+        # OnChain factors
+        if hasattr(indicators, 'netflow'):
+            # Negative netflow = accumulation (good for buying)
+            if indicators.netflow < -5000:  # 5000+ BTC accumulation
+                score += 1.5
+                reasons.append(f"Strong accumulation: {indicators.netflow:.0f} BTC")
+            elif indicators.netflow < -1000:  # 1000+ BTC accumulation
+                score += 1
+                reasons.append(f"Moderate accumulation: {indicators.netflow:.0f} BTC")
+            elif indicators.netflow > 5000:  # Distribution
+                score -= 1
+                reasons.append(f"Exchange distribution: {indicators.netflow:.0f} BTC")
+        
+        if hasattr(indicators, 'old_utxos'):
+            # Old UTXO movement can indicate long-term holders selling
+            if indicators.old_utxos > 50:
+                score -= 0.5
+                reasons.append(f"Old UTXO movement: {indicators.old_utxos}")
+        
+        if hasattr(indicators, 'fee_rate'):
+            # Low fees = less network congestion
+            if indicators.fee_rate < 10:
+                score += 0.5
+                reasons.append(f"Low network fees: {indicators.fee_rate:.1f} sat/vB")
+            elif indicators.fee_rate > 50:
+                score -= 0.5
+                reasons.append(f"High network fees: {indicators.fee_rate:.1f} sat/vB")
+        
         return score, reasons
 
     def _calculate_sell_score(
@@ -768,6 +789,28 @@ class TradingBot:
         if indicators.market_regime == "downtrend":
             score += 1
             reasons.append("Downtrend regime")
+
+         # OnChain factors for selling
+        if hasattr(indicators, 'netflow'):
+            # Positive netflow = distribution (bearish)
+            if indicators.netflow > 5000:  # Major exchange inflow
+                score += 1.5
+                reasons.append(f"Major exchange inflow: {indicators.netflow:.0f} BTC")
+            elif indicators.netflow > 1000:
+                score += 1
+                reasons.append(f"Exchange inflow: {indicators.netflow:.0f} BTC")
+        
+        if hasattr(indicators, 'old_utxos'):
+            # Old coins moving often precedes selloffs
+            if indicators.old_utxos > 100:
+                score += 1
+                reasons.append(f"Significant old UTXO movement: {indicators.old_utxos}")
+        
+        if hasattr(indicators, 'fee_rate'):
+            # Very high fees can indicate panic selling
+            if indicators.fee_rate > 100:
+                score += 0.5
+                reasons.append(f"Network congestion: {indicators.fee_rate:.1f} sat/vB")
 
         return score, reasons
 

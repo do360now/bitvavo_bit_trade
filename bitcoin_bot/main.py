@@ -65,7 +65,7 @@ class TradingBotManager:
             config = BotConfiguration(
                 enable_ml=True,
                 enable_peak_detection=True,
-                enable_onchain_analysis=False,  # Simplified for now
+                enable_onchain_analysis=True,  # Simplified for now
                 enable_news_sentiment=True,
                 max_daily_trades=8,
                 base_position_size_pct=0.10,
@@ -73,6 +73,9 @@ class TradingBotManager:
                 take_profit_pct=0.10,
                 min_confidence_threshold=0.6,
             )
+
+            # Check if Bitcoin node is available
+            onchain_enabled = self._check_bitcoin_node_available()
 
             # Initialize the unified bot
             logger.info("🤖 Creating unified trading bot...")
@@ -82,7 +85,9 @@ class TradingBotManager:
                 enable_ml=True,
                 enable_peak_detection=True,
                 enable_advanced_strategies=True,
+                enable_onchain_analysis=onchain_enabled
             )
+            logger.info(f"Unified bot initialized (OnChain: {'✅' if onchain_enabled else '❌'})")
 
             # Load any existing state
             self.bot.load_state()
@@ -110,6 +115,33 @@ class TradingBotManager:
         except Exception as e:
             logger.error(f"❌ Bot initialization failed: {e}", exc_info=True)
             return False
+        
+    def _check_bitcoin_node_available(self) -> bool:
+        """Check if Bitcoin Core node is available"""
+        try:
+            from utils.config import RPC_HOST, RPC_PORT, RPC_USER, RPC_PASSWORD
+            
+            # Basic check - see if RPC credentials are configured
+            if not all([RPC_HOST, RPC_PORT, RPC_USER, RPC_PASSWORD]):
+                logger.info("Bitcoin node credentials not configured - OnChain disabled")
+                return False
+            
+            # Try to create a quick connection test
+            from bitcoinrpc.authproxy import AuthServiceProxy
+            rpc_url = f"http://{RPC_USER}:{RPC_PASSWORD}@{RPC_HOST}:{RPC_PORT}"
+            rpc = AuthServiceProxy(rpc_url, timeout=5)
+            
+            # Quick health check
+            block_count = rpc.getblockcount()
+            logger.info(f"Bitcoin node available - Block height: {block_count}")
+            return True
+            
+        except ImportError:
+            logger.info("Bitcoin RPC library not available - OnChain disabled")
+            return False
+        except Exception as e:
+            logger.info(f"Bitcoin node not available: {e} - OnChain disabled")
+        return False
 
     def setup_signal_handlers(self):
         """Setup graceful shutdown handlers"""

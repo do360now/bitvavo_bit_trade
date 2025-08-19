@@ -81,6 +81,7 @@ class UnifiedTradingBot:
         enable_ml: bool = True,
         enable_peak_detection: bool = True,
         enable_advanced_strategies: bool = True,
+        enable_onchain_analysis: bool = True,
     ):
         """
         Initialize unified trading bot
@@ -123,6 +124,11 @@ class UnifiedTradingBot:
         if enable_advanced_strategies:
             self._initialize_strategies()
 
+         # Initialize onchain analyzer if enabled
+        self.onchain_analyzer = None
+        if enable_onchain_analysis:
+            self._initialize_onchain_analyzer()
+
         # Performance tracking
         self.session_start = datetime.now()
         self.total_trades = 0
@@ -134,6 +140,30 @@ class UnifiedTradingBot:
         self.last_update = time.time()
 
         logger.info("Unified trading bot initialized successfully")
+
+
+    def _initialize_onchain_analyzer(self):
+        """Initialize on-chain analyzer"""
+        try:
+            from onchain_analyzer import OnChainAnalyzer
+            
+            self.onchain_analyzer = OnChainAnalyzer()
+            
+            # Test the connection
+            signals = self.onchain_analyzer.get_onchain_signals()
+            if signals:
+                logger.info("OnChain analyzer initialized successfully")
+                logger.info(f"Network status: Fee rate={signals.get('fee_rate', 0):.1f} sat/vB, "
+                        f"Netflow={signals.get('netflow', 0):.1f} BTC")
+            else:
+                logger.warning("OnChain analyzer initialized but no data received")
+                
+        except ImportError:
+            logger.warning("OnChain analyzer module not available")
+            self.onchain_analyzer = None
+        except Exception as e:
+            logger.error(f"Failed to initialize OnChain analyzer: {e}")
+        self.onchain_analyzer = None
 
     def _init_performance_tracker(self):
         """Initialize performance tracker with fallback"""
@@ -286,6 +316,9 @@ class UnifiedTradingBot:
         # Get base market analysis from core bot
         indicators = self.core_bot.analyze_market()
 
+        if self.onchain_analyzer:
+            self._add_onchain_analysis(indicators)
+
         # Enhance with ML predictions if available
         if self.ml_engine and self.ml_engine.is_trained:
             try:
@@ -344,6 +377,22 @@ class UnifiedTradingBot:
 
         return indicators
 
+    def _add_onchain_analysis(self, indicators: MarketIndicators):
+        """Add on-chain analysis to indicators"""
+        try:
+            signals = self.onchain_analyzer.get_onchain_signals()
+            
+            indicators.netflow = signals.get('netflow', 0.0)
+            indicators.fee_rate = signals.get('fee_rate', 0.0)
+            indicators.onchain_volume = signals.get('volume', 0.0)
+            indicators.old_utxos = signals.get('old_utxos', 0.0)
+            
+            logger.debug(f"OnChain data: Netflow={indicators.netflow:.1f}, "
+                        f"Fees={indicators.fee_rate:.1f}, Volume={indicators.onchain_volume:.1f}")
+            
+        except Exception as e:
+            logger.warning(f"OnChain analysis failed: {e}")
+    
     def generate_unified_signal(self, indicators: MarketIndicators) -> TradingSignal:
         """
         Generate trading signal using multiple approaches and combine them
@@ -680,6 +729,18 @@ class UnifiedTradingBot:
                     print(
                         f"   {name.title()}: {win_rate:.1%} win rate ({trades} trades)"
                     )
+
+            # Add onchain section
+            if self.onchain_analyzer:
+                try:
+                    signals = self.onchain_analyzer.get_onchain_signals()
+                    print(f"\n🔗 ONCHAIN METRICS:")
+                    print(f"   📊 Network Volume: {signals.get('onchain_volume', 0):.0f} BTC")
+                    print(f"   💸 Net Flow: {signals.get('netflow', 0):+.0f} BTC ({'📈 Accumulation' if signals.get('netflow', 0) < 0 else '📉 Distribution' if signals.get('netflow', 0) > 0 else 'Neutral'})")
+                    print(f"   ⛽ Fee Rate: {signals.get('fee_rate', 0):.1f} sat/vB")
+                    print(f"   🕰️ Old UTXOs: {signals.get('old_utxos', 0)} moving")
+                except Exception as e:
+                    print(f"   ❌ OnChain data error: {e}")
 
             print(f"{'='*80}\n")
 
