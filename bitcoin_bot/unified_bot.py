@@ -144,9 +144,9 @@ class UnifiedTradingBot:
 
          # Lower consensus thresholds for more responsive trading
         self.consensus_thresholds = {
-            'buy_threshold': 0.51,   # Reduced from implied 0.6
-            'sell_threshold': 0.51,  # Reduced from implied 0.6
-            'confidence_boost': 0.2  # Boost for single strong signals
+            'buy_threshold': 0.48,   # Reduced from implied 0.6
+            'sell_threshold': 0.48,  # Reduced from implied 0.6
+            'confidence_boost': 0.25  # Boost for single strong signals
         }
 
 
@@ -992,7 +992,7 @@ class UnifiedTradingBot:
 
             # Balances
             balances = status["balances"]
-            print(f"💎 BTC Balance: {balances['btc']:.8f}")
+            print(f"₿🪙 BTC Balance: {balances['btc']:.8f}")
             print(f"💶 EUR Balance: €{balances['eur']:.2f}")
             print(f"🏦 Total Value: €{balances['total_value_eur']:.2f}")
 

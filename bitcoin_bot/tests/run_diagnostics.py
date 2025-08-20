@@ -243,7 +243,7 @@ def test_api_connectivity():
         btc_balance = executor.get_total_btc_balance()
         eur_balance = executor.get_available_balance("EUR")
 
-        print(f"💎 BTC balance: {btc_balance:.8f}")
+        print(f"₿🪙 BTC balance: {btc_balance:.8f}")
         print(f"💶 EUR balance: €{eur_balance:.2f}")
         print(
             f"💰 Total portfolio value: €{eur_balance + (btc_balance * current_price):.2f}"

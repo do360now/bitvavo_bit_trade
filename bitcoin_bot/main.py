@@ -113,8 +113,8 @@ class TradingBotManager:
 
             logger.info("💰 Current Status:")
             logger.info(f"   BTC Price: €{current_price:.2f}")
-            logger.info(f"   BTC Balance: {btc_balance:.8f}")
-            logger.info(f"   EUR Balance: €{eur_balance:.2f}")
+            logger.info(f"₿🪙  BTC Balance: {btc_balance:.8f}")
+            logger.info(f"💶  EUR Balance: €{eur_balance:.2f}")
             logger.info(
                 f"   Total Value: €{eur_balance + (btc_balance * current_price):.2f}"
             )
@@ -388,7 +388,7 @@ def run_status_check():
         print("📊 QUICK STATUS CHECK")
         print(f"{'='*50}")
         print(f"💰 BTC Price: €{current_price:.2f}")
-        print(f"💎 BTC Balance: {btc_balance:.8f}")
+        print(f"₿🪙 BTC Balance: {btc_balance:.8f}")
         print(f"💶 EUR Balance: €{eur_balance:.2f}")
         print(f"💰 Total Value: €{eur_balance + (btc_balance * current_price):.2f}")
 

@@ -1270,7 +1270,7 @@ class EnhancedTradingBot:
                 self.original_bot.trade_executor.get_available_balance("EUR") or 0
             )
 
-            print(f"💎 BTC Balance: {btc_balance:.8f}")
+            print(f"₿🪙 BTC Balance: {btc_balance:.8f}")
             print(f"💶 EUR Balance: €{eur_balance:.2f}")
 
             if current_price and btc_balance:
