@@ -278,20 +278,20 @@ class TradingBot:
 
     def analyze_market(self) -> MarketIndicators:
         """
-        Comprehensive market analysis combining all indicators.
-
-        Returns:
-            MarketIndicators object with all calculated values
+        Enhanced market analysis with real-time data updates
         """
         # Get current market data
         current_price, current_volume = self.trade_executor.fetch_current_price()
         if not current_price:
             raise ValueError("Cannot fetch current price")
-
-        # Update history
+        
+        # CRITICAL FIX: Get recent OHLC data and append to history
+        self._update_price_history()
+        
+        # Update history with current data point
         self.price_history.append(current_price)
         self.volume_history.append(current_volume)
-
+        
         # Convert to lists for calculations
         prices = list(self.price_history)
         volumes = list(self.volume_history)
@@ -363,6 +363,44 @@ class TradingBot:
         )
 
         return indicators
+    
+    def _update_price_history(self):
+        """Update price history with recent OHLC data"""
+        try:
+            # Get recent OHLC data from the exchange
+            recent_ohlc = self.trade_executor.get_ohlc_data(
+                pair="BTC/EUR",
+                interval='15m',
+                limit=100  # Get last 100 candles
+            )
+            
+            if recent_ohlc:
+                # Append new data to price history
+                added_count = self.data_manager.append_ohlc_data(recent_ohlc)
+                
+                if added_count > 0:
+                    logger.info(f"Updated price history with {added_count} new candles")
+                    
+                    # Reload the updated price history
+                    prices, volumes = self.data_manager.load_price_history()
+                    
+                    # Update our cached history with recent data
+                    if len(prices) > len(self.price_history):
+                        # Clear and repopulate with fresh data
+                        self.price_history.clear()
+                        self.volume_history.clear()
+                        
+                        # Take the most recent 1000 points
+                        for price, volume in zip(prices[-1000:], volumes[-1000:]):
+                            self.price_history.append(price)
+                            self.volume_history.append(volume)
+                        
+                        logger.info(f"Price history updated: {len(self.price_history)} points")
+                
+        except Exception as e:
+            logger.warning(f"Failed to update price history: {e}")
+
+
 
     def _calculate_volatility_safe(self, prices, window=20):
         """

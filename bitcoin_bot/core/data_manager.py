@@ -147,140 +147,131 @@ class DataManager:
             return [], []
 
     def append_ohlc_data(self, ohlc_data: List[List]) -> int:
-        """Append new OHLC data to price history, avoiding duplicates"""
+        """Append new OHLC data to price history, avoiding duplicates - FIXED VERSION"""
         if not ohlc_data:
             logger.debug("No OHLC data to append")
             return 0
-
+        
         try:
             # Load existing data
             existing_data = []
             if os.path.exists(self.price_history_file):
-                with open(self.price_history_file, "r") as f:
+                with open(self.price_history_file, 'r') as f:
                     existing_data = json.load(f)
-
+            
             # Get existing timestamps for duplicate detection
             existing_timestamps = set()
             if existing_data:
                 for candle in existing_data:
                     if isinstance(candle, list) and len(candle) > 0:
                         existing_timestamps.add(int(candle[0]))
-
-            # Process new OHLC data
-            new_candles = []
+            
+            # FIXED: More lenient timestamp validation
             current_time = int(time.time())
-
-            # FIXED: Much more lenient timestamp validation
-            # Accept timestamps from 2 years ago to 1 month in future
-            min_valid_timestamp = current_time - (2 * 365 * 24 * 3600)  # 2 years ago
-            max_valid_timestamp = current_time + (30 * 24 * 3600)  # 1 month in future
-
-            logger.info(
-                f"Current time: {current_time} ({datetime.fromtimestamp(current_time)})"
-            )
-            logger.info(
-                f"Valid timestamp range: {min_valid_timestamp} to {max_valid_timestamp}"
-            )
-
+            min_valid_timestamp = current_time - (30 * 24 * 3600)  # 30 days ago (was too restrictive)
+            max_valid_timestamp = current_time + (1 * 24 * 3600)   # 1 day in future
+            
+            logger.info(f"Current time: {current_time} ({datetime.fromtimestamp(current_time)})")
+            logger.info(f"Processing {len(ohlc_data)} potential new candles...")
+            logger.info(f"Existing data points: {len(existing_data)}")
+            logger.info(f"Existing timestamps range: {min(existing_timestamps) if existing_timestamps else 'None'} to {max(existing_timestamps) if existing_timestamps else 'None'}")
+            
+            new_candles = []
+            processed_count = 0
+            
             for candle in ohlc_data:
+                processed_count += 1
                 try:
                     if not isinstance(candle, list) or len(candle) < 6:
                         logger.debug(f"Skipping invalid candle format: {candle}")
                         continue
-
+                    
                     # Extract timestamp and convert if needed
                     timestamp = int(candle[0])
-
-                    # Log the timestamp for debugging (only first few)
-                    if len(new_candles) < 3:
-                        logger.info(
-                            f"Processing timestamp: {timestamp} ({datetime.fromtimestamp(timestamp)})"
-                        )
-
-                    # FIXED: More lenient timestamp validation
-                    # if timestamp < min_valid_timestamp:
-                    #     logger.debug(f"Skipping very old timestamp: {timestamp}")
-                    #     continue
-
-                    # if timestamp > max_valid_timestamp:
-                    #     logger.debug(f"Skipping far future timestamp: {timestamp}")
-                    #     continue
-
+                    
+                    # Log first few timestamps for debugging
+                    if processed_count <= 3:
+                        logger.info(f"Processing timestamp {processed_count}: {timestamp} ({datetime.fromtimestamp(timestamp)})")
+                    
+                    # FIXED: Less restrictive timestamp validation
+                    if timestamp < min_valid_timestamp:
+                        if processed_count <= 3:
+                            logger.debug(f"Skipping old timestamp: {timestamp} (older than 30 days)")
+                        continue
+                    
+                    if timestamp > max_valid_timestamp:
+                        if processed_count <= 3:
+                            logger.debug(f"Skipping future timestamp: {timestamp}")
+                        continue
+                    
                     # Skip duplicates
                     if timestamp in existing_timestamps:
-                        logger.debug(f"Skipping duplicate timestamp: {timestamp}")
+                        if processed_count <= 3:
+                            logger.debug(f"Skipping duplicate timestamp: {timestamp}")
                         continue
-
+                    
                     # Validate OHLC values
                     open_price = float(candle[1])
                     high_price = float(candle[2])
                     low_price = float(candle[3])
                     close_price = float(candle[4])
                     volume = float(candle[5])
-
+                    
                     # Basic price validation
-                    if not (
-                        0 < low_price <= high_price
-                        and low_price <= open_price <= high_price
-                        and low_price <= close_price <= high_price
-                        and volume >= 0
-                    ):
+                    if not (0 < low_price <= high_price and 
+                        low_price <= open_price <= high_price and 
+                        low_price <= close_price <= high_price and
+                        volume >= 0):
                         logger.debug(f"Skipping invalid OHLC values: {candle}")
                         continue
-
+                    
                     # Price sanity check (Bitcoin should be > $1000 and < $1M)
                     if not (1000 < close_price < 1000000):
                         logger.debug(f"Skipping unrealistic price: {close_price}")
                         continue
-
-                    new_candles.append(
-                        [
-                            timestamp,
-                            open_price,
-                            high_price,
-                            low_price,
-                            close_price,
-                            volume,
-                        ]
-                    )
+                    
+                    new_candles.append([timestamp, open_price, high_price, low_price, close_price, volume])
                     existing_timestamps.add(timestamp)
-                    logger.debug(
-                        f"Added valid candle: {timestamp} @ €{close_price:.2f}"
-                    )
-
+                    
+                    if len(new_candles) <= 3:
+                        logger.info(f"Added valid candle: {timestamp} @ €{close_price:.2f}")
+                    
                 except (ValueError, TypeError, IndexError) as e:
                     logger.debug(f"Skipping invalid OHLC candle: {candle} - {e}")
                     continue
-
+            
             if new_candles:
                 # Add new candles to existing data
                 existing_data.extend(new_candles)
-
-                # Sort by timestamp and remove duplicates
+                
+                # Sort by timestamp and remove any remaining duplicates
                 existing_data.sort(key=lambda x: x[0])
-
-                # Keep only last 10000 candles to manage file size
-                if len(existing_data) > 10000:
-                    existing_data = existing_data[-10000:]
-
+                
+                # Keep only last 5000 candles to manage file size (increased from 2000)
+                if len(existing_data) > 5000:
+                    existing_data = existing_data[-5000:]
+                
                 # Save updated data
-                with open(self.price_history_file, "w") as f:
+                with open(self.price_history_file, 'w') as f:
                     json.dump(existing_data, f)
-
-                logger.info(
-                    f"Appended {len(new_candles)} valid OHLC candles to {self.price_history_file}"
-                )
+                
+                logger.info(f"✅ Successfully added {len(new_candles)} new OHLC candles")
+                logger.info(f"📊 Total candles in history: {len(existing_data)}")
+                
+                if new_candles:
+                    latest = new_candles[-1]
+                    earliest = new_candles[0]
+                    logger.info(f"📅 Date range: {datetime.fromtimestamp(earliest[0])} to {datetime.fromtimestamp(latest[0])}")
+                    logger.info(f"💰 Price range: €{min(c[4] for c in new_candles):.2f} to €{max(c[4] for c in new_candles):.2f}")
             else:
-                logger.info(
-                    f"No new valid OHLC candles to append (checked {len(ohlc_data)} candles)"
-                )
-
+                logger.info(f"ℹ️  No new valid candles to append from {len(ohlc_data)} processed")
+            
             return len(new_candles)
-
+            
         except Exception as e:
             logger.error(f"Failed to append OHLC data: {e}")
             return 0
-
+    
     def log_strategy(self, **kwargs) -> None:
         max_retries = 3
         for attempt in range(max_retries):

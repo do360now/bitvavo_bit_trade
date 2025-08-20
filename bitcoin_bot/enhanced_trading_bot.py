@@ -810,7 +810,7 @@ class EnhancedTradingBot:
                 self.original_bot.data_manager.append_ohlc_data(ohlc)
 
             # Calculate all indicators (reusing original bot's logic)
-            from indicators import (
+            from core.indicators import (
                 calculate_rsi,
                 calculate_macd,
                 calculate_bollinger_bands,

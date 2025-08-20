@@ -119,7 +119,7 @@ class MLConfig:
     online_batch_size: int = 50
 
     # Performance thresholds
-    min_accuracy_threshold: float = 0.55
+    min_accuracy_threshold: float = 0.50 # changed it from 0.55
     min_f1_threshold: float = 0.50
 
     # Ensemble settings

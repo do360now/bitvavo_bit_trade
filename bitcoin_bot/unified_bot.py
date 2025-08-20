@@ -556,46 +556,140 @@ class UnifiedTradingBot:
         else:
             return RiskLevel.LOW
 
+    def diagnose_data_freshness(self):
+        """Diagnose data freshness issue"""
+        try:
+            # Load current price history
+            prices, volumes = self.data_manager.load_price_history()
+            
+            if prices:
+                # Get timestamps from file
+                with open(self.data_manager.price_history_file, 'r') as f:
+                    data = json.load(f)
+                
+                if data:
+                    latest_timestamp = max(int(candle[0]) for candle in data)
+                    earliest_timestamp = min(int(candle[0]) for candle in data)
+                    
+                    latest_date = datetime.fromtimestamp(latest_timestamp)
+                    earliest_date = datetime.fromtimestamp(earliest_timestamp)
+                    current_date = datetime.now()
+                    
+                    data_age_hours = (current_date - latest_date).total_seconds() / 3600
+                    
+                    print(f"\n📊 PRICE HISTORY DIAGNOSIS:")
+                    print(f"   Earliest data: {earliest_date}")
+                    print(f"   Latest data: {latest_date}")
+                    print(f"   Current time: {current_date}")
+                    print(f"   Data age: {data_age_hours:.1f} hours")
+                    print(f"   Total candles: {len(data)}")
+                    
+                    if data_age_hours > 1:
+                        print(f"   ⚠️  WARNING: Data is {data_age_hours:.1f} hours old!")
+                        return False
+                    else:
+                        print(f"   ✅ Data is fresh")
+                        return True
+                
+        except Exception as e:
+            print(f"❌ Diagnosis failed: {e}")
+            return False
+    
+    
+    
+    
+    def _force_price_history_update(self):
+        """Force update of price history before trading decisions"""
+        try:
+            logger.debug("Forcing price history update...")
+            
+            # Get fresh OHLC data
+            recent_data = self.trade_executor.get_ohlc_data(
+                pair="BTC/EUR",
+                interval='15m',
+                since=int(time.time()) - (7 * 24 * 3600),  # Last 7 days
+                limit=672  # 7 days * 24 hours * 4 (15-min intervals)
+            )
+            
+            if recent_data:
+                added = self.data_manager.append_ohlc_data(recent_data)
+                if added > 0:
+                    logger.info(f"🔄 Price history updated with {added} fresh candles")
+                    
+                    # Reload price history
+                    prices, volumes = self.data_manager.load_price_history()
+                    
+                    # Update cache
+                    self.price_history.clear()
+                    self.volume_history.clear()
+                    
+                    for price, volume in zip(prices[-1000:], volumes[-1000:]):
+                        self.price_history.append(price)
+                        self.volume_history.append(volume)
+                    
+                    logger.info(f"📊 Using {len(self.price_history)} data points for analysis")
+                else:
+                    logger.debug("No new data to add")
+            else:
+                logger.warning("Failed to fetch recent OHLC data")
+                
+        except Exception as e:
+            logger.error(f"Failed to force price history update: {e}")
+    
+    
     def execute_unified_strategy(self):
-        """
-        Execute unified trading strategy
-        """
+        """Execute unified trading strategy with better error handling"""
+        indicators = None  # Initialize to avoid UnboundLocalError
+        
         try:
             logger.info("Executing unified trading strategy...")
-
+            
             # Update pending orders first
             self.core_bot._update_pending_orders()
-
+            
             # Check if we can trade
             if not self.core_bot._can_trade():
                 logger.info("Trading conditions not met")
                 return
-
-            # Analyze market
-            indicators = self.analyze_market()
-
+            
+            # Try to analyze market
+            try:
+                indicators = self.analyze_market()
+            except ValueError as e:
+                if "Insufficient price history" in str(e):
+                    logger.warning(f"⚠️  Price history issue: {e}")
+                    logger.info("🔄 Attempting to rebuild price history...")
+                    
+                    # Try to rebuild price history
+                    success = self._emergency_rebuild_price_history()
+                    if success:
+                        logger.info("✅ Price history rebuilt, retrying analysis...")
+                        indicators = self.analyze_market()
+                    else:
+                        logger.error("❌ Failed to rebuild price history")
+                        return
+                else:
+                    raise  # Re-raise other ValueError types
+            
             # Generate unified signal
             signal = self.generate_unified_signal(indicators)
-
+            
             # Log decision
             self.core_bot._log_trading_decision(signal, indicators)
-
+            
             # Execute trade if signal is actionable
-            if (
-                signal.action != TradingAction.HOLD
-                and signal.confidence > self.config.min_confidence_threshold
-            ):
+            if signal.action != TradingAction.HOLD and signal.confidence > self.config.min_confidence_threshold:
                 success = self.core_bot._execute_trade(signal)
-
+                
                 if success:
                     # Update performance tracking
                     self.total_trades += 1
-
+                    
                     # Record trade in performance tracker
                     if self._performance_tracker:
                         try:
                             order_id = f"trade_{int(time.time())}"
-                            fee = signal.price * signal.volume * 0.0025  # Bitvavo fee
+                            fee = signal.price * signal.volume * 0.0025
                             
                             self._performance_tracker.record_trade(
                                 order_id=order_id,
@@ -610,61 +704,82 @@ class UnifiedTradingBot:
                             
                         except Exception as e:
                             logger.warning(f"Failed to record trade in performance tracker: {e}")
-
-                    # Update ML model with new data if available
-                    if self.ml_engine and signal.action != TradingAction.HOLD:
-                        try:
-                            market_data = {
-                                "rsi": indicators.rsi,
-                                "macd": indicators.macd,
-                                "current_price": indicators.current_price,
-                                "sentiment": indicators.sentiment,
-                                "volatility": indicators.volatility,
-                            }
-
-                            # We'll update with actual outcome later
-                            # For now, just note that we made a trade
-                            logger.debug(
-                                "Trade executed - will update ML model with outcome later"
-                            )
-
-                        except Exception as e:
-                            logger.warning(f"Failed to update ML model: {e}")
-
+                    
                     # Update strategy states
                     for strategy in self.strategies.values():
                         strategy.update_state(signal, True)
-
+                    
                     logger.info(f"✅ Trade executed: {signal.action.value.upper()}")
                 else:
                     logger.warning("Trade execution failed")
             else:
-                logger.info(
-                    f"Holding: {signal.reasoning[0] if signal.reasoning else 'Low confidence'}"
-                )
-
-            # Update equity tracking
-            if self._performance_tracker:
-                try:
-                    btc_balance = self.trade_executor.get_total_btc_balance() or 0
-                    eur_balance = self.trade_executor.get_available_balance("EUR") or 0
-                    current_price = indicators.current_price
-                    
-                    self._performance_tracker.update_equity(btc_balance, eur_balance, current_price)
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to update equity tracking: {e}")
+                logger.info(f"Holding: {signal.reasoning[0] if signal.reasoning else 'Low confidence'}")
             
+            # Update equity tracking (with safety check)
+            if indicators is not None:
+                if self._performance_tracker:
+                    try:
+                        btc_balance = self.trade_executor.get_total_btc_balance() or 0
+                        eur_balance = self.trade_executor.get_available_balance("EUR") or 0
+                        
+                        self._performance_tracker.update_equity(btc_balance, eur_balance, indicators.current_price)
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to update equity tracking: {e}")
             
-        except Exception as e:
-            logger.error(f"Unified strategy execution failed: {e}", exc_info=True)
-    
-            self.core_bot._update_equity_tracking(indicators.current_price)
-
             self.last_update = time.time()
-
+            
         except Exception as e:
             logger.error(f"Unified strategy execution failed: {e}", exc_info=True)
+
+    def _emergency_rebuild_price_history(self) -> bool:
+        """Emergency rebuild of price history"""
+        try:
+            logger.info("🚨 Emergency: Rebuilding price history from scratch...")
+            
+            # Get comprehensive OHLC data
+            fresh_data = self.trade_executor.get_ohlc_data(
+                pair="BTC/EUR",
+                interval='15m',
+                since=int(time.time()) - (14 * 24 * 3600),  # Last 14 days
+                limit=1344  # 14 days * 24 hours * 4 (15-min intervals)
+            )
+            
+            if fresh_data:
+                logger.info(f"📥 Fetched {len(fresh_data)} fresh OHLC candles")
+                
+                # Clear existing data
+                with open(self.data_manager.price_history_file, 'w') as f:
+                    json.dump([], f)
+                
+                # Add fresh data
+                added = self.data_manager.append_ohlc_data(fresh_data)
+                
+                if added > 0:
+                    # Reload price history
+                    prices, volumes = self.data_manager.load_price_history()
+                    
+                    # Update cache
+                    self.price_history.clear()
+                    self.volume_history.clear()
+                    
+                    for price, volume in zip(prices[-1000:], volumes[-1000:]):
+                        self.price_history.append(price)
+                        self.volume_history.append(volume)
+                    
+                    logger.info(f"✅ Emergency rebuild successful: {len(self.price_history)} points")
+                    return True
+                else:
+                    logger.error("❌ No data added during emergency rebuild")
+                    return False
+            else:
+                logger.error("❌ Failed to fetch fresh OHLC data")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Emergency rebuild failed: {e}")
+            return False
+
 
     def get_comprehensive_status(self) -> Dict[str, Any]:
         """Get comprehensive status including all components"""

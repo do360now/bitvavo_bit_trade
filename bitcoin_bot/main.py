@@ -120,6 +120,15 @@ class TradingBotManager:
             )
 
             logger.info("✅ Unified trading bot initialized successfully")
+        
+
+            logger.info("🔍 Checking price data freshness...")
+            if hasattr(self.bot, 'diagnose_data_freshness'):
+                is_fresh = self.bot.diagnose_data_freshness()
+                if not is_fresh:
+                    logger.warning("⚠️  Price data appears stale - forcing update...")
+                    self.bot._force_price_history_update()
+            
             return True
 
         except Exception as e:
