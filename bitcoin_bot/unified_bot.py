@@ -142,7 +142,216 @@ class UnifiedTradingBot:
         self._performance_tracker = None
         self._init_performance_tracker()
 
+         # Lower consensus thresholds for more responsive trading
+        self.consensus_thresholds = {
+            'buy_threshold': 0.51,   # Reduced from implied 0.6
+            'sell_threshold': 0.51,  # Reduced from implied 0.6
+            'confidence_boost': 0.2  # Boost for single strong signals
+        }
+
+
+
         logger.info("Unified trading bot initialized successfully")
+
+    def diagnose_trading_signals(self, indicators: MarketIndicators) -> Dict[str, Any]:
+        """
+        NEW: Diagnostic method to analyze why signals aren't being generated
+        """
+        diagnosis = {
+            'timestamp': datetime.now().isoformat(),
+            'market_conditions': {
+                'price': indicators.current_price,
+                'rsi': indicators.rsi,
+                'sentiment': indicators.sentiment,
+                'volatility': indicators.volatility,
+                'risk_off_prob': indicators.risk_off_probability
+            },
+            'strategy_analysis': {},
+            'consensus_thresholds': self.consensus_thresholds,
+            'recommendations': []
+        }
+        
+        # Analyze each strategy
+        for name, strategy in self.strategies.items():
+            try:
+                should_trade, reason = strategy.should_trade(indicators)
+                if should_trade:
+                    analysis = strategy.analyze(indicators)
+                    signal = strategy.generate_signal(indicators, analysis)
+                    
+                    diagnosis['strategy_analysis'][name] = {
+                        'should_trade': should_trade,
+                        'signal_action': signal.action.value,
+                        'signal_confidence': signal.confidence,
+                        'reasoning': signal.reasoning,
+                        'analysis_summary': {
+                            key: value for key, value in analysis.items() 
+                            if isinstance(value, (int, float, str, bool))
+                        }
+                    }
+                else:
+                    diagnosis['strategy_analysis'][name] = {
+                        'should_trade': False,
+                        'reason': reason,
+                        'signal_action': 'hold',
+                        'signal_confidence': 0.0
+                    }
+                    
+            except Exception as e:
+                diagnosis['strategy_analysis'][name] = {
+                    'error': str(e),
+                    'should_trade': False
+                }
+        
+        # Core bot analysis
+        core_signal = self.core_bot.generate_signal(indicators)
+        diagnosis['core_bot_signal'] = {
+            'action': core_signal.action.value,
+            'confidence': core_signal.confidence,
+            'reasoning': core_signal.reasoning
+        }
+        
+        # Generate recommendations
+        if not any(s.get('should_trade', False) for s in diagnosis['strategy_analysis'].values()):
+            diagnosis['recommendations'].append("No strategies want to trade - check strategy conditions")
+        
+        if core_signal.confidence > 0.6 and core_signal.action != TradingAction.HOLD:
+            diagnosis['recommendations'].append(f"Core bot has strong {core_signal.action.value} signal but strategies disagree")
+            
+        if indicators.volatility > 0.05:
+            diagnosis['recommendations'].append("High volatility may be preventing strategy activation")
+            
+        return diagnosis
+    
+
+    def _combine_signals(
+        self,
+        signals: List[Tuple[str, TradingSignal, float]],
+        indicators: MarketIndicators,
+    ) -> TradingSignal:
+        """
+        FIXED: Improved signal combination with better consensus logic
+        """
+        if not signals:
+            return TradingSignal(
+                action=TradingAction.HOLD,
+                confidence=0.5,
+                volume=0.0,
+                price=indicators.current_price,
+                reasoning=["No signals available"],
+            )
+
+        # Enhanced weighted voting system
+        buy_score = 0.0
+        sell_score = 0.0
+        hold_score = 0.0
+        total_weight = 0.0
+
+        all_reasoning = []
+        signal_details = []
+
+        for name, signal, weight in signals:
+            total_weight += weight
+            
+            # Store signal details for debugging
+            signal_details.append({
+                'name': name,
+                'action': signal.action.value,
+                'confidence': signal.confidence,
+                'weight': weight,
+                'reasoning': signal.reasoning
+            })
+
+            if signal.action == TradingAction.BUY:
+                buy_score += weight * signal.confidence
+                all_reasoning.extend([f"[{name}] {r}" for r in signal.reasoning[:1]])
+            elif signal.action == TradingAction.SELL:
+                sell_score += weight * signal.confidence
+                all_reasoning.extend([f"[{name}] {r}" for r in signal.reasoning[:1]])
+            else:
+                hold_score += weight * 0.5
+
+        # Normalize scores
+        if total_weight > 0:
+            buy_score /= total_weight
+            sell_score /= total_weight
+            hold_score /= total_weight
+
+        # FIXED: More responsive decision logic
+        max_score = max(buy_score, sell_score, hold_score)
+        
+        # Log signal analysis for debugging
+        logger.info(f"🔍 Signal Analysis: BUY={buy_score:.3f}, SELL={sell_score:.3f}, HOLD={hold_score:.3f}")
+        for detail in signal_details:
+            logger.debug(f"  {detail['name']}: {detail['action']} (conf={detail['confidence']:.2f}, weight={detail['weight']:.2f})")
+
+        # Improved decision logic
+        if max_score == buy_score and buy_score > self.consensus_thresholds['buy_threshold']:
+            action = TradingAction.BUY
+            confidence = min(0.95, buy_score)
+            
+            # Boost confidence if we have a very strong single signal
+            if any(signal[1].confidence > 0.7 and signal[1].action == TradingAction.BUY for signal in signals):
+                confidence = min(0.95, confidence + self.consensus_thresholds['confidence_boost'])
+                all_reasoning.insert(0, "Strong signal detected")
+                
+        elif max_score == sell_score and sell_score > self.consensus_thresholds['sell_threshold']:
+            action = TradingAction.SELL
+            confidence = min(0.95, sell_score)
+            
+            # Boost confidence if we have a very strong single signal
+            if any(signal[1].confidence > 0.7 and signal[1].action == TradingAction.SELL for signal in signals):
+                confidence = min(0.95, confidence + self.consensus_thresholds['confidence_boost'])
+                all_reasoning.insert(0, "Strong signal detected")
+                
+        else:
+            action = TradingAction.HOLD
+            confidence = 0.5
+            
+            # Provide more detailed reasoning for holds
+            if max_score == buy_score:
+                all_reasoning = [f"BUY signal too weak: {buy_score:.3f} < {self.consensus_thresholds['buy_threshold']:.3f} threshold"]
+            elif max_score == sell_score:
+                all_reasoning = [f"SELL signal too weak: {sell_score:.3f} < {self.consensus_thresholds['sell_threshold']:.3f} threshold"]
+            else:
+                all_reasoning = ["No clear directional consensus among strategies"]
+
+        # Apply peak detection override (unchanged)
+        if (
+            self.peak_system
+            and indicators.peak_probability
+            and indicators.peak_probability > 0.7
+            and action == TradingAction.BUY
+        ):
+            logger.warning(
+                f"Peak override: Changing BUY to HOLD (peak prob: {indicators.peak_probability:.1%})"
+            )
+            action = TradingAction.HOLD
+            confidence *= 0.7
+            all_reasoning.insert(
+                0, f"Peak detection override ({indicators.peak_probability:.1%})"
+            )
+
+        # Calculate position size using core bot logic
+        volume = self.core_bot._calculate_position_size(
+            action, indicators, confidence, self._assess_risk_level(indicators)
+        )
+
+        final_signal = TradingSignal(
+            action=action,
+            confidence=confidence,
+            volume=volume,
+            price=indicators.current_price,
+            reasoning=all_reasoning[:3],  # Top 3 reasons
+            risk_level=self._assess_risk_level(indicators),
+        )
+        
+        # Enhanced logging
+        logger.info(f"🎯 Final Signal: {action.value.upper()} (confidence: {confidence:.1%}, volume: {volume:.6f})")
+        if all_reasoning:
+            logger.info(f"📝 Reasoning: {all_reasoning[0]}")
+
+        return final_signal
 
 
     def _initialize_onchain_analyzer(self):
@@ -430,93 +639,7 @@ class UnifiedTradingBot:
         # Combine signals using weighted voting
         return self._combine_signals(signals, indicators)
 
-    def _combine_signals(
-        self,
-        signals: List[Tuple[str, TradingSignal, float]],
-        indicators: MarketIndicators,
-    ) -> TradingSignal:
-        """
-        Combine multiple trading signals using weighted voting
-        """
-        if not signals:
-            return TradingSignal(
-                action=TradingAction.HOLD,
-                confidence=0.5,
-                volume=0.0,
-                price=indicators.current_price,
-                reasoning=["No signals available"],
-            )
-
-        # Weighted voting
-        buy_score = 0.0
-        sell_score = 0.0
-        hold_score = 0.0
-        total_weight = 0.0
-
-        all_reasoning = []
-
-        for name, signal, weight in signals:
-            total_weight += weight
-
-            if signal.action == TradingAction.BUY:
-                buy_score += weight * signal.confidence
-                all_reasoning.extend([f"[{name}] {r}" for r in signal.reasoning[:1]])
-            elif signal.action == TradingAction.SELL:
-                sell_score += weight * signal.confidence
-                all_reasoning.extend([f"[{name}] {r}" for r in signal.reasoning[:1]])
-            else:
-                hold_score += weight * 0.5
-
-        # Normalize scores
-        if total_weight > 0:
-            buy_score /= total_weight
-            sell_score /= total_weight
-            hold_score /= total_weight
-
-        # Determine final action
-        max_score = max(buy_score, sell_score, hold_score)
-
-        if max_score == buy_score and buy_score > 0.6:
-            action = TradingAction.BUY
-            confidence = min(0.95, buy_score)
-        elif max_score == sell_score and sell_score > 0.6:
-            action = TradingAction.SELL
-            confidence = min(0.95, sell_score)
-        else:
-            action = TradingAction.HOLD
-            confidence = 0.5
-            all_reasoning = ["Insufficient consensus among strategies"]
-
-        # Apply peak detection override
-        if (
-            self.peak_system
-            and indicators.peak_probability
-            and indicators.peak_probability > 0.7
-            and action == TradingAction.BUY
-        ):
-
-            logger.warning(
-                f"Peak override: Changing BUY to HOLD (peak prob: {indicators.peak_probability:.1%})"
-            )
-            action = TradingAction.HOLD
-            confidence *= 0.7
-            all_reasoning.insert(
-                0, f"Peak detection override ({indicators.peak_probability:.1%})"
-            )
-
-        # Calculate position size using core bot logic
-        volume = self.core_bot._calculate_position_size(
-            action, indicators, confidence, self._assess_risk_level(indicators)
-        )
-
-        return TradingSignal(
-            action=action,
-            confidence=confidence,
-            volume=volume,
-            price=indicators.current_price,
-            reasoning=all_reasoning[:3],  # Top 3 reasons
-            risk_level=self._assess_risk_level(indicators),
-        )
+    
 
     def _assess_risk_level(self, indicators: MarketIndicators) -> RiskLevel:
         """Assess current risk level"""
@@ -638,8 +761,10 @@ class UnifiedTradingBot:
     
     
     def execute_unified_strategy(self):
-        """Execute unified trading strategy with better error handling"""
-        indicators = None  # Initialize to avoid UnboundLocalError
+        """
+        ENHANCED: Execute unified trading strategy with better diagnostics
+        """
+        indicators = None
         
         try:
             logger.info("Executing unified trading strategy...")
@@ -660,7 +785,6 @@ class UnifiedTradingBot:
                     logger.warning(f"⚠️  Price history issue: {e}")
                     logger.info("🔄 Attempting to rebuild price history...")
                     
-                    # Try to rebuild price history
                     success = self._emergency_rebuild_price_history()
                     if success:
                         logger.info("✅ Price history rebuilt, retrying analysis...")
@@ -669,10 +793,22 @@ class UnifiedTradingBot:
                         logger.error("❌ Failed to rebuild price history")
                         return
                 else:
-                    raise  # Re-raise other ValueError types
+                    raise
             
             # Generate unified signal
             signal = self.generate_unified_signal(indicators)
+            
+            # If holding, run diagnostics to understand why
+            if signal.action == TradingAction.HOLD and "Insufficient consensus" in str(signal.reasoning):
+                logger.info("🔍 Running trading signal diagnostics...")
+                diagnosis = self.diagnose_trading_signals(indicators)
+                
+                # Log key diagnostic info
+                active_strategies = sum(1 for s in diagnosis['strategy_analysis'].values() if s.get('should_trade', False))
+                logger.info(f"📊 Diagnostic: {active_strategies}/{len(self.strategies)} strategies want to trade")
+                
+                for rec in diagnosis['recommendations'][:2]:  # Top 2 recommendations
+                    logger.info(f"💡 {rec}")
             
             # Log decision
             self.core_bot._log_trading_decision(signal, indicators)
@@ -713,9 +849,12 @@ class UnifiedTradingBot:
                 else:
                     logger.warning("Trade execution failed")
             else:
-                logger.info(f"Holding: {signal.reasoning[0] if signal.reasoning else 'Low confidence'}")
+                if signal.confidence <= self.config.min_confidence_threshold:
+                    logger.info(f"Holding: Low confidence ({signal.confidence:.1%} < {self.config.min_confidence_threshold:.1%})")
+                else:
+                    logger.info(f"Holding: {signal.reasoning[0] if signal.reasoning else 'No specific reason'}")
             
-            # Update equity tracking (with safety check)
+            # Update equity tracking
             if indicators is not None:
                 if self._performance_tracker:
                     try:
@@ -731,6 +870,7 @@ class UnifiedTradingBot:
             
         except Exception as e:
             logger.error(f"Unified strategy execution failed: {e}", exc_info=True)
+
 
     def _emergency_rebuild_price_history(self) -> bool:
         """Emergency rebuild of price history"""

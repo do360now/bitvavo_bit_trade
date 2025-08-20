@@ -1,3 +1,8 @@
+# bitcoin_bot/trading/executor_fixed.py
+"""
+Fixed Trade Executor with proper real-time data handling
+"""
+
 import time
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -8,12 +13,14 @@ class TradeExecutor:
     def __init__(self, bitvavo_api):
         self.bitvavo_api = bitvavo_api
         self.pair = "BTC/EUR"  # Bitvavo pair format
+        self.last_ohlc_fetch = 0
+        self.ohlc_cache_duration = 60  # Cache for 1 minute
 
     def fetch_current_price(self) -> tuple[Optional[float], float]:
         """Fetch current BTC/EUR price and volume from Bitvavo"""
         try:
-            # Get OHLCV data (1m timeframe for recent data)
-            ohlcv = self.bitvavo_api.fetch_ohlcv(self.pair, "15m", limit=10)
+            # Get OHLCV data (1m timeframe for most recent data)
+            ohlcv = self.bitvavo_api.fetch_ohlcv(self.pair, "1m", limit=1)
             logger.debug(f"Raw OHLCV response: {ohlcv}")
 
             if ohlcv and len(ohlcv) > 0:
@@ -21,6 +28,16 @@ class TradeExecutor:
                 latest_candle = ohlcv[-1]
                 close_price = float(latest_candle[4])  # Close price
                 volume = float(latest_candle[5])  # Volume
+                
+                # Validate timestamp is recent (within last hour)
+                candle_timestamp = int(latest_candle[0]) // 1000  # Convert to seconds
+                current_time = int(time.time())
+                age_minutes = (current_time - candle_timestamp) / 60
+                
+                if age_minutes > 60:
+                    logger.warning(f"⚠️ Price data is {age_minutes:.1f} minutes old")
+                else:
+                    logger.debug(f"✅ Fresh price data ({age_minutes:.1f} min old)")
 
                 logger.debug(f"Fetched price: €{close_price:.2f}, volume: {volume:.2f}")
                 return close_price, volume
@@ -32,42 +49,227 @@ class TradeExecutor:
             logger.error(f"Failed to fetch current price: {e}")
             return None, 0.0
 
+    def get_ohlc_data(
+        self,
+        pair: str = None,
+        interval: str = "15m",
+        since: int = None,
+        limit: int = 100,
+    ):
+        """FIXED: Get OHLC data with improved timestamp handling and caching"""
+        try:
+            if pair is None:
+                pair = self.pair
+
+            # Convert Kraken interval format to Bitvavo format if needed
+            interval_map = {
+                1: "1m",
+                5: "5m",
+                15: "15m",
+                30: "30m",
+                60: "1h",
+                240: "4h",
+                1440: "1d",
+            }
+
+            if isinstance(interval, int):
+                interval = interval_map.get(interval, "15m")
+
+            # Improved since parameter handling
+            if since is None:
+                # Get recent data (last 7 days for 15m intervals = 672 candles)
+                since = int(time.time() - (7 * 24 * 3600))
+            
+            # Ensure since is not too far back for the requested limit
+            max_seconds_back = limit * self._get_interval_seconds(interval)
+            min_since = int(time.time() - max_seconds_back)
+            since = max(since, min_since)
+
+            logger.info(f"Fetching OHLC data since {datetime.fromtimestamp(since)} for pair {pair}")
+
+            # Fetch OHLCV data with improved parameters
+            ohlcv = self.bitvavo_api.fetch_ohlcv(
+                symbol=pair,
+                timeframe=interval,
+                since=since * 1000,  # Convert to milliseconds
+                limit=min(limit, 1000),  # Cap at 1000 to avoid API limits
+            )
+
+            if ohlcv:
+                # Process and validate the data
+                formatted_data = []
+                current_time = int(time.time())
+                
+                logger.info(f"Processing {len(ohlcv)} raw OHLC candles")
+                
+                # Sort by timestamp to ensure chronological order
+                ohlcv.sort(key=lambda x: x[0])
+
+                for i, candle in enumerate(ohlcv):
+                    try:
+                        # Bitvavo returns timestamps in milliseconds
+                        timestamp_ms = int(candle[0])
+                        timestamp = timestamp_ms // 1000  # Convert to seconds
+
+                        # Debug first few timestamps
+                        if i < 3:
+                            logger.debug(f"Candle {i}: Raw timestamp {timestamp_ms} -> {timestamp} ({datetime.fromtimestamp(timestamp)})")
+
+                        # IMPROVED: More lenient timestamp validation
+                        # Allow data from last 365 days to 1 hour in future
+                        min_valid = current_time - (365 * 24 * 3600)  # 1 year ago
+                        max_valid = current_time + (1 * 3600)  # 1 hour in future
+
+                        if timestamp < min_valid:
+                            logger.debug(f"Skipping very old timestamp: {timestamp}")
+                            continue
+
+                        if timestamp > max_valid:
+                            logger.debug(f"Skipping future timestamp: {timestamp}")
+                            continue
+
+                        # Validate OHLC data
+                        open_price = float(candle[1])
+                        high_price = float(candle[2])
+                        low_price = float(candle[3])
+                        close_price = float(candle[4])
+                        volume = float(candle[5])
+
+                        # Basic validation
+                        if not (
+                            0 < low_price <= high_price
+                            and low_price <= open_price <= high_price
+                            and low_price <= close_price <= high_price
+                            and volume >= 0
+                        ):
+                            logger.debug(f"Skipping invalid OHLC values: {candle}")
+                            continue
+
+                        # IMPROVED: More realistic price validation for Bitcoin
+                        # Allow prices from €100 to €1,000,000 to handle different time periods
+                        if not (100 < close_price < 1000000):
+                            logger.debug(f"Skipping unrealistic price: {close_price}")
+                            continue
+
+                        formatted_data.append([
+                            timestamp,     # timestamp in seconds
+                            open_price,    # open
+                            high_price,    # high
+                            low_price,     # low
+                            close_price,   # close
+                            volume,        # volume
+                        ])
+
+                    except (ValueError, TypeError, IndexError) as e:
+                        logger.debug(f"Skipping invalid candle {i}: {candle} - {e}")
+                        continue
+
+                if formatted_data:
+                    logger.info(f"✅ Successfully formatted {len(formatted_data)} OHLC candles")
+                    
+                    # Log data quality metrics
+                    timestamps = [c[0] for c in formatted_data]
+                    prices = [c[4] for c in formatted_data]
+                    
+                    logger.info(f"📅 Time range: {datetime.fromtimestamp(min(timestamps))} to {datetime.fromtimestamp(max(timestamps))}")
+                    logger.info(f"💰 Price range: €{min(prices):.2f} to €{max(prices):.2f}")
+                    
+                    # Check for data gaps
+                    interval_seconds = self._get_interval_seconds(interval)
+                    expected_intervals = (max(timestamps) - min(timestamps)) // interval_seconds
+                    actual_intervals = len(formatted_data)
+                    data_completeness = actual_intervals / max(1, expected_intervals)
+                    
+                    if data_completeness < 0.8:
+                        logger.warning(f"⚠️ Data completeness: {data_completeness:.1%} (may have gaps)")
+                    else:
+                        logger.info(f"✅ Data completeness: {data_completeness:.1%}")
+                        
+                else:
+                    logger.warning("❌ No valid OHLC candles after processing")
+
+                return formatted_data
+
+            logger.warning("No OHLC data received from API")
+            return []
+
+        except Exception as e:
+            logger.error(f"Failed to fetch OHLC data: {e}")
+            return []
+
+    def _get_interval_seconds(self, interval: str) -> int:
+        """Get interval duration in seconds"""
+        interval_map = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+        }
+        return interval_map.get(interval, 900)  # Default to 15 minutes
+
+    def validate_data_freshness(self, ohlc_data: List[List]) -> bool:
+        """Validate that OHLC data is reasonably fresh"""
+        if not ohlc_data:
+            return False
+            
+        try:
+            latest_timestamp = max(candle[0] for candle in ohlc_data)
+            current_time = int(time.time())
+            age_hours = (current_time - latest_timestamp) / 3600
+            
+            # Data should be less than 2 hours old for trading
+            is_fresh = age_hours < 2
+            
+            if not is_fresh:
+                logger.warning(f"⚠️ OHLC data is {age_hours:.1f} hours old")
+            else:
+                logger.debug(f"✅ OHLC data is fresh ({age_hours:.1f} hours old)")
+                
+            return is_fresh
+            
+        except Exception as e:
+            logger.error(f"Failed to validate data freshness: {e}")
+            return False
+
     def get_btc_order_book(self) -> Optional[Dict]:
         """Get BTC/EUR order book from Bitvavo"""
         try:
             order_book = self.bitvavo_api.fetch_order_book(self.pair)
-            logger.debug(
-                f"Order book fetched: bids={len(order_book.get('bids', []))}, asks={len(order_book.get('asks', []))}"
-            )
+            
+            # Validate order book has data
+            if not order_book.get('bids') or not order_book.get('asks'):
+                logger.warning("Order book missing bids or asks")
+                return None
+                
+            logger.debug(f"Order book fetched: bids={len(order_book.get('bids', []))}, asks={len(order_book.get('asks', []))}")
             return order_book
         except Exception as e:
             logger.error(f"Failed to fetch order book: {e}")
             return None
 
     def get_optimal_price(self, order_book: Dict, side: str) -> Optional[float]:
-        """Calculate optimal price from order book"""
+        """Calculate optimal price from order book with improved logic"""
         try:
             if side == "buy":
-                # For buying, use the best ask price (slightly lower to get filled)
+                # For buying, use the best ask price (slightly below to get filled quickly)
                 asks = order_book.get("asks", [])
                 if asks:
                     best_ask = float(asks[0][0])
-                    # Place buy order slightly below best ask to ensure fill
-                    optimal_price = best_ask * 0.9999  # 0.0% below best ask
-                    logger.debug(
-                        f"Optimal buy price: €{optimal_price:.2f} (best ask: €{best_ask:.2f})"
-                    )
+                    # Place buy order slightly below best ask to ensure better fill rate
+                    optimal_price = best_ask * 0.9995  # 0.05% below best ask
+                    logger.debug(f"Optimal buy price: €{optimal_price:.2f} (best ask: €{best_ask:.2f})")
                     return optimal_price
             else:  # sell
-                # For selling, use the best bid price (slightly higher to get filled)
+                # For selling, use the best bid price (slightly above to get filled quickly)
                 bids = order_book.get("bids", [])
                 if bids:
                     best_bid = float(bids[0][0])
-                    # Place sell order slightly above best bid to ensure fill
-                    optimal_price = best_bid * 1.0001  # 0.01% above best bid
-                    logger.debug(
-                        f"Optimal sell price: €{optimal_price:.2f} (best bid: €{best_bid:.2f})"
-                    )
+                    # Place sell order slightly above best bid to ensure better fill rate
+                    optimal_price = best_bid * 1.0005  # 0.05% above best bid
+                    logger.debug(f"Optimal sell price: €{optimal_price:.2f} (best bid: €{best_bid:.2f})")
                     return optimal_price
 
             logger.warning(f"No {side} price available in order book")
@@ -76,6 +278,7 @@ class TradeExecutor:
         except Exception as e:
             logger.error(f"Failed to calculate optimal price: {e}")
             return None
+
 
     def execute_trade(self, volume: float, side: str, price: float) -> bool:
         """Execute a limit order on Bitvavo"""
@@ -198,143 +401,6 @@ class TradeExecutor:
             logger.error(f"Failed to fetch {currency} balance: {e}")
             return None
 
-    def get_ohlc_data(
-        self,
-        pair: str = None,
-        interval: str = "15m",
-        since: int = None,
-        limit: int = 100,
-    ):
-        """Get OHLC data for backtesting and analysis with improved timestamp handling"""
-        try:
-            if pair is None:
-                pair = self.pair
-
-            # Convert Kraken interval format to Bitvavo format if needed
-            interval_map = {
-                1: "1m",
-                5: "5m",
-                15: "15m",
-                30: "30m",
-                60: "1h",
-                240: "4h",
-                1440: "1d",
-            }
-
-            if isinstance(interval, int):
-                interval = interval_map.get(interval, "15m")
-
-            # For first run, get more historical data
-            if since is None:
-                # Get last 7 days of data for initial setup
-                since = int(time.time() - (7 * 24 * 3600))
-
-            logger.info(
-                f"Fetching OHLC data since {datetime.fromtimestamp(since)} for pair {pair}"
-            )
-
-            # Fetch OHLCV data
-            ohlcv = self.bitvavo_api.fetch_ohlcv(
-                symbol=pair,
-                timeframe=interval,
-                since=since * 1000 if since else None,  # Convert to milliseconds
-                limit=limit,
-            )
-
-            if ohlcv:
-                # Convert to format expected by existing code
-                # [timestamp, open, high, low, close, volume]
-                formatted_data = []
-                current_time = int(time.time())
-
-                logger.info(f"Processing {len(ohlcv)} raw OHLC candles")
-
-                for i, candle in enumerate(ohlcv):
-                    try:
-                        # Bitvavo returns timestamps in milliseconds
-                        timestamp_ms = int(candle[0])
-                        timestamp = timestamp_ms // 1000  # Convert to seconds
-
-                        # Debug first few timestamps
-                        if i < 5:
-                            logger.info(
-                                f"Candle {i}: Raw timestamp {timestamp_ms} -> {timestamp} ({datetime.fromtimestamp(timestamp)})"
-                            )
-
-                        # Validate timestamp is reasonable (not too far in past or future)
-                        min_valid = current_time - (365 * 24 * 3600)  # 1 year ago
-                        max_valid = current_time + (24 * 3600)  # 1 day in future
-
-                        if timestamp < min_valid:
-                            logger.debug(
-                                f"Skipping old timestamp: {timestamp} ({datetime.fromtimestamp(timestamp)})"
-                            )
-                            continue
-
-                        if timestamp > max_valid:
-                            logger.debug(
-                                f"Skipping future timestamp: {timestamp} ({datetime.fromtimestamp(timestamp)})"
-                            )
-                            continue
-
-                        # Validate OHLC data
-                        open_price = float(candle[1])
-                        high_price = float(candle[2])
-                        low_price = float(candle[3])
-                        close_price = float(candle[4])
-                        volume = float(candle[5])
-
-                        # Basic validation
-                        if not (
-                            0 < low_price <= high_price
-                            and low_price <= open_price <= high_price
-                            and low_price <= close_price <= high_price
-                            and volume >= 0
-                        ):
-                            logger.debug(f"Skipping invalid OHLC values: {candle}")
-                            continue
-
-                        # Price sanity check for Bitcoin
-                        if not (1000 < close_price < 1000000):
-                            logger.debug(f"Skipping unrealistic price: {close_price}")
-                            continue
-
-                        formatted_data.append(
-                            [
-                                timestamp,  # timestamp in seconds
-                                open_price,  # open
-                                high_price,  # high
-                                low_price,  # low
-                                close_price,  # close
-                                volume,  # volume
-                            ]
-                        )
-
-                    except (ValueError, TypeError, IndexError) as e:
-                        logger.debug(f"Skipping invalid candle {i}: {candle} - {e}")
-                        continue
-
-                if formatted_data:
-                    logger.info(
-                        f"Successfully formatted {len(formatted_data)} OHLC candles"
-                    )
-                    logger.info(
-                        f"Time range: {datetime.fromtimestamp(formatted_data[0][0])} to {datetime.fromtimestamp(formatted_data[-1][0])}"
-                    )
-                    logger.info(
-                        f"Price range: €{min(c[4] for c in formatted_data):.2f} to €{max(c[4] for c in formatted_data):.2f}"
-                    )
-                else:
-                    logger.warning("No valid OHLC candles after processing")
-
-                return formatted_data
-
-            logger.warning("No OHLC data received from API")
-            return []
-
-        except Exception as e:
-            logger.error(f"Failed to fetch OHLC data: {e}")
-            return []
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order"""
