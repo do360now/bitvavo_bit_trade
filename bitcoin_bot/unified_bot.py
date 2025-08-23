@@ -9,6 +9,7 @@ import json
 import os
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
+from unittest import signals
 
 # from dataclasses import dataclass, field
 # from enum import Enum
@@ -17,27 +18,16 @@ import pandas as pd
 import logging
 import utils.logger as logger
 
-# Import your existing components
-try:
-    # Try to import from your actual file structure
-    from core.bot import (
-        TradingBot as CoreBot,
-        BotConfiguration,
-        MarketIndicators,
-        TradingSignal,
-        TradingAction,
-        RiskLevel,
-    )
-except ImportError:
-    # Fallback for different structure
-    from core.bot import (
-        TradingBot as CoreBot,
-        BotConfiguration,
-        MarketIndicators,
-        TradingSignal,
-        TradingAction,
-        RiskLevel,
-    )
+
+# Try to import from your actual file structure
+from core.bot import (
+    TradingBot as CoreBot,
+    BotConfiguration,
+    MarketIndicators,
+    TradingSignal,
+    TradingAction,
+    RiskLevel,
+)
 
 from core.data_manager import DataManager
 from trading.executor import TradeExecutor
@@ -144,14 +134,15 @@ class UnifiedTradingBot:
 
          # Lower consensus thresholds for more responsive trading
         self.consensus_thresholds = {
-            'buy_threshold': 0.48,   # Reduced from implied 0.6
-            'sell_threshold': 0.48,  # Reduced from implied 0.6
-            'confidence_boost': 0.25  # Boost for single strong signals
+            'buy_threshold': 0.15,   # Reduced from implied 0.6
+            'sell_threshold': 0.15,  # Reduced from implied 0.6
+            'confidence_boost': 0.35  # Boost for single strong signals
         }
-
-
+      
 
         logger.info("Unified trading bot initialized successfully")
+
+
 
     def diagnose_trading_signals(self, indicators: MarketIndicators) -> Dict[str, Any]:
         """
@@ -224,14 +215,8 @@ class UnifiedTradingBot:
         return diagnosis
     
 
-    def _combine_signals(
-        self,
-        signals: List[Tuple[str, TradingSignal, float]],
-        indicators: MarketIndicators,
-    ) -> TradingSignal:
-        """
-        FIXED: Improved signal combination with better consensus logic
-        """
+    def _combine_signals(self, signals, indicators):
+        """FIXED: Allow DCA and other strategies to actually execute trades"""
         if not signals:
             return TradingSignal(
                 action=TradingAction.HOLD,
@@ -241,98 +226,48 @@ class UnifiedTradingBot:
                 reasoning=["No signals available"],
             )
 
-        # Enhanced weighted voting system
         buy_score = 0.0
         sell_score = 0.0
-        hold_score = 0.0
         total_weight = 0.0
-
         all_reasoning = []
-        signal_details = []
 
         for name, signal, weight in signals:
             total_weight += weight
             
-            # Store signal details for debugging
-            signal_details.append({
-                'name': name,
-                'action': signal.action.value,
-                'confidence': signal.confidence,
-                'weight': weight,
-                'reasoning': signal.reasoning
-            })
-
             if signal.action == TradingAction.BUY:
                 buy_score += weight * signal.confidence
                 all_reasoning.extend([f"[{name}] {r}" for r in signal.reasoning[:1]])
             elif signal.action == TradingAction.SELL:
                 sell_score += weight * signal.confidence
                 all_reasoning.extend([f"[{name}] {r}" for r in signal.reasoning[:1]])
-            else:
-                hold_score += weight * 0.5
 
         # Normalize scores
         if total_weight > 0:
             buy_score /= total_weight
             sell_score /= total_weight
-            hold_score /= total_weight
 
-        # FIXED: More responsive decision logic
-        max_score = max(buy_score, sell_score, hold_score)
+        logger.info(f"🔍 Signal Analysis: BUY={buy_score:.3f}, SELL={sell_score:.3f}")
         
-        # Log signal analysis for debugging
-        logger.info(f"🔍 Signal Analysis: BUY={buy_score:.3f}, SELL={sell_score:.3f}, HOLD={hold_score:.3f}")
-        for detail in signal_details:
-            logger.debug(f"  {detail['name']}: {detail['action']} (conf={detail['confidence']:.2f}, weight={detail['weight']:.2f})")
-
-        # Improved decision logic
-        if max_score == buy_score and buy_score > self.consensus_thresholds['buy_threshold']:
+        # CRITICAL FIX: Much more aggressive thresholds
+        if buy_score > self.consensus_thresholds['buy_threshold'] and buy_score > sell_score:
             action = TradingAction.BUY
-            confidence = min(0.95, buy_score)
+            confidence = min(0.95, buy_score + 0.3)  # Boost confidence significantly
             
-            # Boost confidence if we have a very strong single signal
-            if any(signal[1].confidence > 0.7 and signal[1].action == TradingAction.BUY for signal in signals):
-                confidence = min(0.95, confidence + self.consensus_thresholds['confidence_boost'])
-                all_reasoning.insert(0, "Strong signal detected")
+            # Special handling for DCA - if DCA wants to buy, let it!
+            if any(name == 'dca' and sig.action == TradingAction.BUY for name, sig, weight in signals):
+                confidence = max(0.7, confidence)  # Ensure DCA gets good confidence
+                all_reasoning.insert(0, "DCA strategy active")
                 
-        elif max_score == sell_score and sell_score > self.consensus_thresholds['sell_threshold']:
+        elif sell_score > self.consensus_thresholds['sell_threshold'] and sell_score > buy_score:
             action = TradingAction.SELL
-            confidence = min(0.95, sell_score)
+            confidence = min(0.95, sell_score + 0.3)
             
-            # Boost confidence if we have a very strong single signal
-            if any(signal[1].confidence > 0.7 and signal[1].action == TradingAction.SELL for signal in signals):
-                confidence = min(0.95, confidence + self.consensus_thresholds['confidence_boost'])
-                all_reasoning.insert(0, "Strong signal detected")
-                
         else:
             action = TradingAction.HOLD
             confidence = 0.5
-            
-            # Provide more detailed reasoning for holds
-            if max_score == buy_score:
-                all_reasoning = [f"BUY signal too weak: {buy_score:.3f} < {self.consensus_thresholds['buy_threshold']:.3f} threshold"]
-            elif max_score == sell_score:
-                all_reasoning = [f"SELL signal too weak: {sell_score:.3f} < {self.consensus_thresholds['sell_threshold']:.3f} threshold"]
-            else:
-                all_reasoning = ["No clear directional consensus among strategies"]
+            all_reasoning = [f"Low consensus: BUY={buy_score:.3f}, SELL={sell_score:.3f}"]
 
-        # Apply peak detection override (unchanged)
-        if (
-            self.peak_system
-            and indicators.peak_probability
-            and indicators.peak_probability > 0.7
-            and action == TradingAction.BUY
-        ):
-            logger.warning(
-                f"Peak override: Changing BUY to HOLD (peak prob: {indicators.peak_probability:.1%})"
-            )
-            action = TradingAction.HOLD
-            confidence *= 0.7
-            all_reasoning.insert(
-                0, f"Peak detection override ({indicators.peak_probability:.1%})"
-            )
-
-        # Calculate position size using core bot logic
+        # Calculate position size
         volume = self.core_bot._calculate_position_size(
             action, indicators, confidence, self._assess_risk_level(indicators)
         )
@@ -342,15 +277,12 @@ class UnifiedTradingBot:
             confidence=confidence,
             volume=volume,
             price=indicators.current_price,
-            reasoning=all_reasoning[:3],  # Top 3 reasons
+            reasoning=all_reasoning[:3],
             risk_level=self._assess_risk_level(indicators),
         )
         
-        # Enhanced logging
         logger.info(f"🎯 Final Signal: {action.value.upper()} (confidence: {confidence:.1%}, volume: {volume:.6f})")
-        if all_reasoning:
-            logger.info(f"📝 Reasoning: {all_reasoning[0]}")
-
+        
         return final_signal
 
 
@@ -606,16 +538,14 @@ class UnifiedTradingBot:
             logger.warning(f"OnChain analysis failed: {e}")
     
     def generate_unified_signal(self, indicators: MarketIndicators) -> TradingSignal:
-        """
-        Generate trading signal using multiple approaches and combine them
-        """
+        """Generate trading signal using multiple approaches and combine them"""
         signals = []
 
         # Get signal from core bot
         core_signal = self.core_bot.generate_signal(indicators)
-        signals.append(("core", core_signal, 1.0))  # Base weight of 1.0
+        signals.append(("core", core_signal, 1.0))  # ✅ Core gets weight 1.0
 
-        # Get signals from advanced strategies
+        # FIXED: Strategy signals with CORRECT weighting
         for name, strategy in self.strategies.items():
             try:
                 should_trade, reason = strategy.should_trade(indicators)
@@ -623,14 +553,20 @@ class UnifiedTradingBot:
                     analysis = strategy.analyze(indicators)
                     signal = strategy.generate_signal(indicators, analysis)
 
-                    # Weight strategies based on their historical performance
-                    performance = strategy.get_performance_metrics()
-                    weight = max(0.5, performance.get("win_rate", 0.5))
+                    # FIX: ALL strategies should get meaningful weights!
+                    if signal.action != TradingAction.HOLD:
+                        # Give higher weight to strategies that want to trade
+                        if signal.confidence > 0.7:
+                            weight = 2.0  # High confidence gets high weight
+                        elif signal.confidence > 0.5:
+                            weight = 1.5  # Medium confidence gets medium weight
+                        else:
+                            weight = 1.0  # Default weight
+                    else:
+                        weight = 1.0  # FIXED: HOLD signals also get full weight (was causing low total)
 
                     signals.append((name, signal, weight))
-                    logger.debug(
-                        f"{name} strategy signal: {signal.action.value} (conf: {signal.confidence:.2f})"
-                    )
+                    logger.debug(f"{name} strategy signal: {signal.action.value} (conf: {signal.confidence:.2f}, weight: {weight:.2f})")
 
             except Exception as e:
                 logger.warning(f"Strategy {name} failed: {e}")
@@ -771,7 +707,9 @@ class UnifiedTradingBot:
             
             # Update pending orders first
             self.core_bot._update_pending_orders()
+
             
+                        
             # Check if we can trade
             if not self.core_bot._can_trade():
                 logger.info("Trading conditions not met")
@@ -797,6 +735,12 @@ class UnifiedTradingBot:
             
             # Generate unified signal
             signal = self.generate_unified_signal(indicators)
+
+
+             # DEBUG: If holding, diagnose why
+            if signal.action == TradingAction.HOLD:
+                self.debug_strategy_signals(indicators)
+            
             
             # If holding, run diagnostics to understand why
             if signal.action == TradingAction.HOLD and "Insufficient consensus" in str(signal.reasoning):
@@ -1132,3 +1076,30 @@ class UnifiedTradingBot:
 
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
+
+    def debug_strategy_signals(self, indicators: MarketIndicators) -> None:
+        """Debug why strategies aren't generating strong signals"""
+        print(f"\n🔧 STRATEGY DEBUGGING:")
+        print(f"Current Price: €{indicators.current_price:.2f}")
+        print(f"RSI: {indicators.rsi:.1f}")
+        print(f"Sentiment: {indicators.sentiment:.3f}")
+        print(f"Market Regime: {indicators.market_regime}")
+        print(f"Volatility: {indicators.volatility:.4f}")
+        
+        for name, strategy in self.strategies.items():
+            try:
+                should_trade, reason = strategy.should_trade(indicators)
+                print(f"\n{name.upper()} Strategy:")
+                print(f"  Should Trade: {should_trade}")
+                print(f"  Reason: {reason}")
+                
+                if should_trade:
+                    analysis = strategy.analyze(indicators)
+                    signal = strategy.generate_signal(indicators, analysis)
+                    print(f"  Signal: {signal.action.value} (confidence: {signal.confidence:.2f})")
+                    print(f"  Reasoning: {signal.reasoning[:2]}")
+                else:
+                    print(f"  Not trading because: {reason}")
+                    
+            except Exception as e:
+                print(f"  ERROR: {e}")

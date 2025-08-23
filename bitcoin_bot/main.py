@@ -68,13 +68,13 @@ class TradingBotManager:
             config = BotConfiguration(
                 enable_ml=True,
                 enable_peak_detection=True,
-                enable_onchain_analysis=True,  # Simplified for now
+                enable_onchain_analysis=True,
                 enable_news_sentiment=True,
                 max_daily_trades=8,
                 base_position_size_pct=0.10,
                 stop_loss_pct=0.03,
                 take_profit_pct=0.10,
-                min_confidence_threshold=0.6,
+                min_confidence_threshold=0.30,  # CRITICAL: Was 0.6, now 0.35 to allow trades!
             )
 
             # Test performance tracker before starting

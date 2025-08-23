@@ -707,6 +707,7 @@ class TradingBot:
         reasons = []
 
         # Technical signals
+        print(f"Indicators RSI: {indicators.rsi} config RSI: {self.config.rsi_oversold}")
         if indicators.rsi < self.config.rsi_oversold:
             score += 1.5
             reasons.append(f"Oversold RSI: {indicators.rsi:.1f}")
@@ -714,19 +715,23 @@ class TradingBot:
             score += 0.5
             reasons.append(f"Low RSI: {indicators.rsi:.1f}")
 
+        print(f"Indicators VWAP: {indicators.vwap} Price: {indicators.current_price}")
         if indicators.current_price < indicators.vwap * 0.98:
             score += 1
             reasons.append("Price below VWAP")
 
+        print(f"Indicators Bollinger Lower: {indicators.bollinger_lower} Price: {indicators.current_price}")
         if indicators.current_price < indicators.bollinger_lower:
             score += 1
             reasons.append("Price below Bollinger lower band")
 
+        print(f"Indicators MACD: {indicators.macd} Signal: {indicators.signal}")
         if indicators.macd > indicators.signal:
             score += 0.5
             reasons.append("MACD bullish crossover")
 
         # Sentiment and ML
+        print(f"Indicators Sentiment: {indicators.sentiment} Risk-off: {indicators.risk_off_probability}")
         if indicators.sentiment > 0.1:
             score += 1
             reasons.append(f"Positive sentiment: {indicators.sentiment:.3f}")
@@ -767,7 +772,8 @@ class TradingBot:
             elif indicators.fee_rate > 50:
                 score -= 0.5
                 reasons.append(f"High network fees: {indicators.fee_rate:.1f} sat/vB")
-        
+
+        print(f"DEBUG: Buy Score: {score}, Reasons: {reasons}")
         return score, reasons
 
     def _calculate_sell_score(
@@ -1082,9 +1088,30 @@ class TradingBot:
 
             if results["cancelled"]:
                 logger.info(f"Orders cancelled: {results['cancelled']}")
+                # FIXED: Reset strategies when orders are cancelled
+                for order_id in results["cancelled"]:
+                    self._process_cancelled_order(order_id)
 
         except Exception as e:
             logger.error(f"Failed to update pending orders: {e}")
+
+    def _process_cancelled_order(self, order_id: str):
+        """ADDED: Process a cancelled order and reset strategies"""
+        try:
+            logger.info(f"Processing cancelled order: {order_id}")
+            
+            # Reset DCA strategy so it can try again
+            for name, strategy in self.strategies.items():
+                if hasattr(strategy, 'reset_after_cancellation'):
+                    strategy.reset_after_cancellation()
+                    logger.info(f"Reset {name} strategy after order cancellation")
+                elif name == 'dca' and hasattr(strategy, 'last_buy_time'):
+                    # Manual reset for DCA strategy
+                    strategy.last_buy_time = None  # Reset so it can buy again
+                    logger.info(f"Reset DCA timing after cancelled order")
+                    
+        except Exception as e:
+            logger.error(f"Failed to process cancelled order {order_id}: {e}")
 
     def _process_filled_order(self, order_id: str):
         """Process a filled order"""
@@ -1104,14 +1131,34 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Failed to process filled order {order_id}: {e}")
 
+    
+
     def _execute_trade(self, signal: TradingSignal) -> bool:
-        """Execute trade based on signal"""
+        """Execute trade based on signal - FIXED ORDER BOOK VERSION"""
         try:
-            # Validate volume
+            # FIXED: More intelligent minimum volume handling
             min_volume = 0.0001  # Bitvavo minimum
+            
             if signal.volume < min_volume:
-                logger.warning(f"Volume too small: {signal.volume:.8f} < {min_volume}")
-                return False
+                # Try to increase volume to minimum if we have enough balance
+                if signal.action == TradingAction.BUY:
+                    eur_balance = self.trade_executor.get_available_balance("EUR") or 0
+                    max_affordable = (eur_balance * 0.95) / signal.price  # Use 95% of balance
+                    
+                    if max_affordable >= min_volume:
+                        logger.info(f"🔧 Increasing volume from {signal.volume:.8f} to minimum {min_volume:.8f}")
+                        signal.volume = min_volume
+                    else:
+                        logger.warning(f"❌ Insufficient balance for minimum trade: need €{min_volume * signal.price:.2f}, have €{eur_balance:.2f}")
+                        return False
+                else:  # SELL
+                    btc_balance = self.trade_executor.get_total_btc_balance() or 0
+                    if btc_balance >= min_volume:
+                        logger.info(f"🔧 Increasing sell volume to minimum {min_volume:.8f}")
+                        signal.volume = min_volume
+                    else:
+                        logger.warning(f"❌ Insufficient BTC for minimum sell: need {min_volume:.8f}, have {btc_balance:.8f}")
+                        return False
 
             # Get order book
             order_book = self.trade_executor.get_btc_order_book()
@@ -1119,10 +1166,54 @@ class TradingBot:
                 logger.error("Cannot fetch order book")
                 return False
 
-            # Calculate optimal price
-            optimal_price = self.trade_executor.get_optimal_price(
-                order_book, signal.action.value
-            )
+            # FIXED: Handle different order book structures safely
+            is_dca_order = signal.reasoning and any('DCA' in str(reason) for reason in signal.reasoning)
+            
+            if is_dca_order:
+                # For DCA orders, use market price for immediate execution
+                logger.info(f"🎯 DCA order detected - using market price for immediate fill")
+                
+                try:
+                    if signal.action == TradingAction.BUY:
+                        # Try different order book structures
+                        if isinstance(order_book, dict) and 'asks' in order_book:
+                            asks = order_book['asks']
+                            if asks and len(asks) > 0:
+                                # Handle both dict and list structures
+                                if isinstance(asks[0], dict):
+                                    optimal_price = asks[0]['price']
+                                elif isinstance(asks[0], list) and len(asks[0]) >= 2:
+                                    optimal_price = asks[0][0]  # First element is usually price
+                                else:
+                                    optimal_price = float(asks[0])
+                            else:
+                                raise ValueError("Empty asks")
+                        else:
+                            raise ValueError("Invalid order book structure")
+                            
+                    else:  # SELL
+                        if isinstance(order_book, dict) and 'bids' in order_book:
+                            bids = order_book['bids']
+                            if bids and len(bids) > 0:
+                                if isinstance(bids[0], dict):
+                                    optimal_price = bids[0]['price']
+                                elif isinstance(bids[0], list) and len(bids[0]) >= 2:
+                                    optimal_price = bids[0][0]
+                                else:
+                                    optimal_price = float(bids[0])
+                            else:
+                                raise ValueError("Empty bids")
+                        else:
+                            raise ValueError("Invalid order book structure")
+                            
+                    logger.info(f"🎯 Market price for DCA {signal.action.value.upper()}: €{optimal_price:.2f}")
+                    
+                except (KeyError, IndexError, ValueError, TypeError) as e:
+                    logger.warning(f"⚠️ Could not get market price: {e}, falling back to optimal price")
+                    optimal_price = self.trade_executor.get_optimal_price(order_book, signal.action.value)
+            else:
+                # For regular trades, use optimal price calculation
+                optimal_price = self.trade_executor.get_optimal_price(order_book, signal.action.value)
 
             if not optimal_price:
                 logger.error("Cannot determine optimal price")
@@ -1137,8 +1228,9 @@ class TradingBot:
             )
 
             if order_id:
+                order_type = "DCA" if is_dca_order else "REGULAR"
                 logger.info(
-                    f"✅ Order placed: {order_id} - "
+                    f"✅ {order_type} Order placed: {order_id} - "
                     f"{signal.action.value.upper()} {signal.volume:.8f} BTC @ €{optimal_price:.2f}"
                 )
                 return True
