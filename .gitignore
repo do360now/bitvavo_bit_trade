@@ -219,3 +219,4 @@ __pycache__/
 *.pyc
 *.log.*
 
+bitcoin_bot/tree.*
