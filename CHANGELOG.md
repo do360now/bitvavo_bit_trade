@@ -236,7 +236,6 @@ RPC_PASSWORD=your_bitcoin_node_password
 - **Mobile notifications** for important events
 
 ### Planned for v2.2
-- **Multi-exchange support** (Coinbase, Kraken)
 - **Advanced ML models** (LSTM, Transformer architectures)
 - **Social sentiment analysis** from Twitter and Reddit
 - **Advanced options strategies**

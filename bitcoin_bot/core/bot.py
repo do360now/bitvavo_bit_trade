@@ -452,18 +452,7 @@ class TradingBot:
             logger.warning(f"Volatility calculation failed: {e}")
             return 0.02  # Safe default
 
-    # Replace the problematic part in your analyze_market method with this:
-    """
-    # BEFORE (problematic):
-    if len(prices) >= 20:
-        returns = np.diff(prices[-20:]) / prices[-21:-1]
-        volatility = float(np.std(returns))
-    else:
-        volatility = 0.02
-
-    # AFTER (fixed):
-    volatility = calculate_volatility_safe(prices, window=20)
-    """
+    
 
     def _determine_market_regime(
         self, prices: List[float], ma_short: float, ma_long: float
@@ -500,6 +489,7 @@ class TradingBot:
                 )
         except Exception as e:
             logger.warning(f"Sentiment analysis failed: {e}")
+            
 
     def _add_ml_predictions(self, indicators: MarketIndicators):
         """Add ML predictions to indicators"""
@@ -705,9 +695,10 @@ class TradingBot:
         """Calculate buy signal score and reasons"""
         score = 0
         reasons = []
+        logger.info(f"Calculating buy score for indicators: {indicators}")
 
         # Technical signals
-        print(f"Indicators RSI: {indicators.rsi} config RSI: {self.config.rsi_oversold}")
+        logger.info(f"Indicators RSI: {indicators.rsi} config RSI: {self.config.rsi_oversold}")
         if indicators.rsi < self.config.rsi_oversold:
             score += 1.5
             reasons.append(f"Oversold RSI: {indicators.rsi:.1f}")
