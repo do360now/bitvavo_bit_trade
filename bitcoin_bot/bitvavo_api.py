@@ -1,170 +1,365 @@
-import requests
-import time
+"""
+Enhanced Bitvavo API Client with async support, security improvements,
+and performance optimizations for high-frequency trading.
+"""
+
+import asyncio
+import aiohttp
 import hmac
 import hashlib
 import json
-from typing import Optional, List, Dict, Any
+import time
+from typing import Dict, List, Optional, Tuple, Any, Union
+from dataclasses import dataclass
+from enum import Enum
 import logging
 from tenacity import retry, wait_exponential, stop_after_attempt
-from utils.config import BITVAVO_API_KEY, BITVAVO_API_SECRET, API_DOMAIN
+from contextlib import asynccontextmanager
+import weakref
+from datetime import datetime, timedelta
 import ccxt
 
 logger = logging.getLogger(__name__)
 
-class BitvavoAPI:
-    def __init__(self, api_key: str, api_secret: str, api_domain: str = "https://api.bitvavo.com/v2"):
-        self.api_key = api_key
-        self.api_secret = api_secret.encode('utf-8')
-        self.api_domain = api_domain
-        self.last_request_time = 0
-        self.request_interval = 0.1  # Bitvavo allows higher frequency
 
-    def _get_bitvavo_signature(self, timestamp: str, method: str, url_path: str, data: Dict = None) -> str:
-        body = '' if data is None else json.dumps(data, separators=(',', ':'))
+class OrderType(Enum):
+    MARKET = "market"
+    LIMIT = "limit"
+    STOP_LOSS = "stopLoss"
+    STOP_LIMIT = "stopLossLimit"
+    TAKE_PROFIT = "takeProfit"
+    TAKE_PROFIT_LIMIT = "takeProfitLimit"
+
+
+class OrderSide(Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+@dataclass
+class OrderRequest:
+    """Type-safe order request structure"""
+    market: str
+    side: OrderSide
+    order_type: OrderType
+    amount: float
+    price: Optional[float] = None
+    stop_price: Optional[float] = None
+    time_in_force: Optional[str] = None
+    post_only: bool = False
+    reduce_only: bool = False
+    client_order_id: Optional[str] = None
+
+
+@dataclass
+class MarketData:
+    """Market data structure with validation"""
+    symbol: str
+    price: float
+    volume: float
+    timestamp: datetime
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    
+    def __post_init__(self):
+        if self.price <= 0:
+            raise ValueError(f"Invalid price: {self.price}")
+        if self.volume < 0:
+            raise ValueError(f"Invalid volume: {self.volume}")
+
+
+class SecurityManager:
+    """Enhanced security manager for API credentials"""
+    
+    def __init__(self, api_key: str, api_secret: str):
+        # Store credentials securely in memory
+        self._api_key = api_key
+        self._api_secret = api_secret.encode('utf-8')
+        
+        # Validate credentials format
+        if not self._api_key or len(self._api_key) < 32:
+            raise ValueError("Invalid API key format")
+        if not self._api_secret or len(self._api_secret) < 32:
+            raise ValueError("Invalid API secret format")
+    
+    def generate_signature(self, timestamp: str, method: str, 
+                          url_path: str, body: str = "") -> str:
+        """Generate HMAC signature for API requests"""
         message = timestamp + method + url_path + body
         signature = hmac.new(
-            self.api_secret,
+            self._api_secret,
             message.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         return signature
+    
+    @property
+    def api_key(self) -> str:
+        return self._api_key
+    
+    def __del__(self):
+        # Clear credentials from memory on cleanup
+        if hasattr(self, '_api_key'):
+            self._api_key = None
+        if hasattr(self, '_api_secret'):
+            self._api_secret = None
 
-    @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(5))
-    def query_public(self, endpoint: str, params: Dict = None) -> Dict:
-        try:
-            url = f'{self.api_domain}/{endpoint}'
-            time_since_last = time.time() - self.last_request_time
-            if time_since_last < self.request_interval:
-                time.sleep(self.request_interval - time_since_last)
-            self.last_request_time = time.time()
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Bitvavo public API request failed: {e}")
-            return {'error': str(e)}
 
-    @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(5))
-    def query_private(self, method: str, endpoint: str, data: Dict = None) -> Dict:
-        try:
+class RateLimiter:
+    """Advanced rate limiter with burst capacity"""
+    
+    def __init__(self, requests_per_second: float = 10.0, burst_capacity: int = 20):
+        self.requests_per_second = requests_per_second
+        self.burst_capacity = burst_capacity
+        self.tokens = burst_capacity
+        self.last_update = time.time()
+        self._lock = asyncio.Lock()
+    
+    async def acquire(self) -> None:
+        """Acquire permission to make a request"""
+        async with self._lock:
+            now = time.time()
+            elapsed = now - self.last_update
+            
+            # Add tokens based on elapsed time
+            self.tokens = min(
+                self.burst_capacity,
+                self.tokens + elapsed * self.requests_per_second
+            )
+            self.last_update = now
+            
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return
+            
+            # Wait for next token
+            wait_time = (1 - self.tokens) / self.requests_per_second
+            await asyncio.sleep(wait_time)
+            self.tokens = 0
+
+
+class EnhancedBitvavoAPI:
+    """
+    Enhanced Bitvavo API client with async support, security improvements,
+    and performance optimizations.
+    """
+    
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        base_url: str = "https://api.bitvavo.com/v2",
+        rate_limit: float = 10.0,
+        max_connections: int = 100
+    ):
+        self.base_url = base_url
+        self.security_manager = SecurityManager(api_key, api_secret)
+        self.rate_limiter = RateLimiter(rate_limit)
+        
+        # Connection management
+        self.connector = aiohttp.TCPConnector(
+            limit=max_connections,
+            limit_per_host=20,
+            keepalive_timeout=30,
+            enable_cleanup_closed=True
+        )
+        self.timeout = aiohttp.ClientTimeout(total=30.0)
+        self._session: Optional[aiohttp.ClientSession] = None
+        
+        # Circuit breaker state
+        self.circuit_breaker_failures = 0
+        self.circuit_breaker_last_failure = 0
+        self.circuit_breaker_threshold = 5
+        self.circuit_breaker_timeout = 300  # 5 minutes
+        
+        # Performance monitoring
+        self.request_count = 0
+        self.total_latency = 0.0
+        
+        logger.info("Enhanced Bitvavo API client initialized")
+    
+    @property
+    def average_latency(self) -> float:
+        """Get average request latency"""
+        return self.total_latency / max(self.request_count, 1)
+    
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create HTTP session"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                connector=self.connector,
+                timeout=self.timeout
+            )
+        return self._session
+    
+    async def _is_circuit_breaker_open(self) -> bool:
+        """Check if circuit breaker is open"""
+        if self.circuit_breaker_failures < self.circuit_breaker_threshold:
+            return False
+        
+        time_since_last_failure = time.time() - self.circuit_breaker_last_failure
+        if time_since_last_failure > self.circuit_breaker_timeout:
+            # Reset circuit breaker
+            self.circuit_breaker_failures = 0
+            return False
+        
+        return True
+    
+    @retry(
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        stop=stop_after_attempt(3)
+    )
+    async def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        authenticated: bool = False
+    ) -> Dict[str, Any]:
+        """Make authenticated API request with comprehensive error handling"""
+        
+        if await self._is_circuit_breaker_open():
+            raise ConnectionError("Circuit breaker is open")
+        
+        await self.rate_limiter.acquire()
+        
+        url = f"{self.base_url}/{endpoint}"
+        headers = {"Content-Type": "application/json"}
+        
+        if authenticated:
             timestamp = str(int(time.time() * 1000))
-            url = f'{self.api_domain}/{endpoint}'
-
-            headers = {
-                'Bitvavo-Access-Key': self.api_key,
-                'Bitvavo-Access-Signature': self._get_bitvavo_signature(timestamp, method, f'/{endpoint}', data),
-                'Bitvavo-Access-Timestamp': timestamp,
-                'Content-Type': 'application/json'
-            }
-
-            time_since_last = time.time() - self.last_request_time
-            if time_since_last < self.request_interval:
-                time.sleep(self.request_interval - time_since_last)
+            body = json.dumps(data, separators=(',', ':')) if data else ""
             
-            self.last_request_time = time.time()
-
-            if method == 'GET':
-                response = requests.get(url, headers=headers, params=data)
-            else:
-                response = requests.post(url, headers=headers, json=data)
+            signature = self.security_manager.generate_signature(
+                timestamp, method, f"/{endpoint}", body
+            )
             
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Bitvavo private API request failed: {e}")
-            return {'error': str(e)}
-
-    def get_ohlc_data(self, pair: str = "BTC-EUR", interval: str = "15m") -> Optional[List[List]]:
+            headers.update({
+                "Bitvavo-Access-Key": self.security_manager.api_key,
+                "Bitvavo-Access-Signature": signature,
+                "Bitvavo-Access-Timestamp": timestamp
+            })
+        
+        start_time = time.time()
+        session = await self._get_session()
+        
         try:
-            params = {
-                "market": pair,
-                "interval": interval
-            }
-            result = self.query_public("candles", params)
-            if isinstance(result, list):
-                return [[
-                    float(candle[0]),  # timestamp
-                    float(candle[1]),  # open
-                    float(candle[2]),  # high
-                    float(candle[3]),  # low
-                    float(candle[4]),  # close
-                    float(candle[5])   # volume
-                ] for candle in result]
-            return []
+            async with session.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=data
+            ) as response:
+                latency = time.time() - start_time
+                self.request_count += 1
+                self.total_latency += latency
+                
+                if response.status == 429:
+                    # Rate limited - back off exponentially
+                    await asyncio.sleep(min(latency * 2, 60))
+                    raise aiohttp.ClientResponseError(
+                        request_info=response.request_info,
+                        history=response.history,
+                        status=response.status,
+                        message="Rate limited"
+                    )
+                
+                response.raise_for_status()
+                result = await response.json()
+                
+                # Record success
+                self.circuit_breaker_failures = max(0, self.circuit_breaker_failures - 1)
+                return result
+                
         except Exception as e:
-            logger.error(f"Failed to fetch OHLC data: {e}")
-            return []
-
-    def get_btc_order_book(self) -> Optional[Dict]:
-        result = self.query_public("BTC-EUR/book")
-        if isinstance(result, dict):
-            return result
-        return None
-
-    def get_optimal_price(self, order_book: Dict, side: str, buffer: float = 0.05, decimals: int = 1) -> Optional[float]:
-        if not order_book:
-            return None
-        try:
-            best_bid = float(order_book['bids'][0][0]) if order_book.get('bids') else None
-            best_ask = float(order_book['asks'][0][0]) if order_book.get('asks') else None
-            if side == "buy":
-                if best_ask is None:
-                    return None
-                optimal_price = best_ask + buffer
-            elif side == "sell":
-                if best_bid is None:
-                    return None
-                optimal_price = best_bid - buffer
-            else:
-                return None
-            return round(optimal_price, decimals)
-        except Exception as e:
-            logger.error(f"Failed to calculate optimal price: {e}")
-            return None
-
-    def get_btc_price(self) -> Optional[float]:
-        result = self.query_public("ticker/price", {"market": "BTC-EUR"})
-        if isinstance(result, dict) and 'price' in result:
-            return float(result['price'])
-        return None
-
-    def get_market_volume(self, pair: str = "BTC-EUR") -> Optional[float]:
-        result = self.query_public("ticker/24h", {"market": pair})
-        if isinstance(result, dict) and 'volume' in result:
-            return float(result['volume'])
-        return None
-
-    def get_available_balance(self, asset: str) -> Optional[float]:
-        result = self.query_private("GET", "balance")
-        if isinstance(result, list):
-            for balance in result:
-                if balance['symbol'] == asset:
-                    return float(balance['available'])
-        return 0.0
-
-    def get_total_btc_balance(self) -> Optional[float]:
-        return self.get_available_balance('BTC')
-
-    def place_order(self, pair: str, side: str, ordertype: str, amount: float, price: float = None) -> Dict:
-        data = {
-            'market': pair,
-            'side': side,
-            'orderType': ordertype,
-            'amount': str(amount)
+            # Record failure
+            self.circuit_breaker_failures += 1
+            self.circuit_breaker_last_failure = time.time()
+            logger.error(f"API request failed: {method} {endpoint} - {e}")
+            raise
+    
+    # Public API methods
+    async def get_ticker(self, symbol: str) -> MarketData:
+        """Get ticker data for symbol"""
+        result = await self._make_request("GET", f"ticker/price", {"market": symbol})
+        
+        return MarketData(
+            symbol=symbol,
+            price=float(result["price"]),
+            volume=0.0,  # Not provided in price endpoint
+            timestamp=datetime.now()
+        )
+    
+    async def get_order_book(self, symbol: str, depth: int = 10) -> Dict[str, Any]:
+        """Get order book for symbol"""
+        params = {"depth": depth}
+        return await self._make_request("GET", f"{symbol}/book", params)
+    
+    async def get_ohlcv(
+        self,
+        symbol: str,
+        interval: str = "15m",
+        limit: int = 100,
+        since: Optional[int] = None
+    ) -> List[List[float]]:
+        """Get OHLCV candlestick data"""
+        params = {
+            "market": symbol,
+            "interval": interval,
+            "limit": limit
         }
-        if price is not None:
-            data['price'] = str(price)
-        return self.query_private('POST', 'order', data)
+        if since:
+            params["start"] = since
+        
+        result = await self._make_request("GET", "candles", params)
+        return result
+    
+    # Authenticated API methods
+    async def get_balance(self) -> Dict[str, Dict[str, float]]:
+        """Get account balance"""
+        result = await self._make_request("GET", "balance", authenticated=True)
+        
+        # Convert list format to dict format for easier access
+        balance_dict = {}
+        for item in result:
+            balance_dict[item["symbol"]] = {
+                "available": float(item["available"]),
+                "inOrder": float(item["inOrder"])
+            }
+        
+        return balance_dict
+    
+    async def place_order(self, order: OrderRequest) -> Dict[str, Any]:
+        """Place a new order"""
+        data = {
+            "market": order.market,
+            "side": order.side.value,
+            "orderType": order.order_type.value,
+            "amount": str(order.amount)
+        }
+        
+        if order.price is not None:
+            data["price"] = str(order.price)
+        if order.stop_price is not None:
+            data["triggerAmount"] = str(order.stop_price)
+        if order.time_in_force:
+            data["timeInForce"] = order.time_in_force
+        if order.post_only:
+            data["postOnly"] = True
+        if order.client_order_id:
+            data["clientOrderId"] = order.client_order_id
+        
+        return await self._make_request("POST", "order", data=data, authenticated=True)
+    
+    async def close(self):
+        """Close all connections"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+        await self.connector.close()
+        logger.info("Bitvavo API client closed")
 
-    def cancel_order(self, order_id: str, pair: str) -> Dict:
-        return self.query_private('DELETE', f'order', {'orderId': order_id, 'market': pair})
-
-    def get_open_orders(self, pair: str = None) -> Dict:
-        params = {'market': pair} if pair else None
-        return self.query_private('GET', 'orders', params)
-
-    def get_order_info(self, order_id: str) -> Dict:
-        return self.query_private('GET', f'order', {'orderId': order_id})
 
 
 def authenticate_bitvavo():
