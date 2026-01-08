@@ -224,6 +224,7 @@ class AsyncBitvavoAPI:
     async def get_balance(self) -> Dict[str, Any]:
         """Get account balance."""
         return await self._make_request("GET", "balance", signed=True)
+
     
     async def create_order(
         self,
@@ -234,7 +235,7 @@ class AsyncBitvavoAPI:
         price: Optional[float] = None,
         time_in_force: str = "GTC"
     ) -> Dict[str, Any]:
-        """Create a new order with enhanced validation."""
+        """Create a new order with required operatorId parameter."""
         # Validate inputs
         if side not in ["buy", "sell"]:
             raise ValueError(f"Invalid side: {side}")
@@ -248,16 +249,44 @@ class AsyncBitvavoAPI:
         if order_type == "limit" and (not price or price <= 0):
             raise ValueError(f"Invalid price for limit order: {price}")
         
+        # Ensure minimum order sizes
+        min_btc_amount = 0.0000900  # From market info
+        min_eur_amount = 10.0
+
+        operator_id = int(time.time() * 1000) + 1  # Different ID for retry
+        
+        # Create order data with required operatorId
         data = {
             "market": symbol,
             "side": side,
             "orderType": order_type,
-            "amount": str(amount),
-            "timeInForce": time_in_force
+            "timeInForce": time_in_force,
+            "operatorId": operator_id  # Required integer parameter for regulatory compliance
         }
         
-        if price:
-            data["price"] = str(price)
+        # Handle different order types properly
+        if order_type == "market":
+            if side == "buy":
+                # For market buy, use EUR amount (amountQuote)
+                if price:
+                    eur_amount = amount * price
+                else:
+                    # Estimate EUR amount if no price provided
+                    eur_amount = max(amount * 96000, min_eur_amount)  # Use rough BTC price
+                
+                eur_amount = max(eur_amount, min_eur_amount)
+                data["amountQuote"] = f"{eur_amount:.2f}"
+            else:
+                # For market sell, use BTC amount
+                amount = max(amount, min_btc_amount)
+                data["amount"] = f"{amount:.8f}"  # 8 decimal places for BTC
+        else:
+            # Limit order - always use BTC amount
+            amount = max(amount, min_btc_amount)
+            data["amount"] = f"{amount:.8f}"
+            data["price"] = f"{price:.2f}"  # 2 decimal places for EUR price
+        
+        logger.info(f"Creating order with data: {data}")
         
         return await self._make_request("POST", "order", data=data, signed=True)
     
