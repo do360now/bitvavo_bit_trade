@@ -54,6 +54,8 @@ class TradingBotManager:
                 logger.error("❌ Exchange connection test failed")
                 return False
 
+            self._check_bitvavo_market_info()
+            
             # Create bot configuration
             config = BotConfiguration(
                 enable_ml=True,
@@ -96,6 +98,31 @@ class TradingBotManager:
             logger.error(f"❌ Bot initialization failed: {e}", exc_info=True)
             return False
 
+    
+    def _check_bitvavo_market_info(self):
+        """Check Bitvavo market information for BTC/EUR"""
+        try:
+            markets = self.bitvavo_api.load_markets()
+            btc_eur = markets.get('BTC/EUR')
+            
+            logger.info("\n" + "="*70)
+            logger.info("BTC/EUR Market Information")
+            logger.info("="*70)
+            logger.info(f"Precision - Price: {btc_eur.get('precision', {}).get('price')}")
+            logger.info(f"Precision - Amount: {btc_eur.get('precision', {}).get('amount')}")
+            logger.info(f"\nLimits:")
+            limits = btc_eur.get('limits', {})
+            logger.info(f"  Amount Min: {limits.get('amount', {}).get('min')}")
+            logger.info(f"  Price Min: {limits.get('price', {}).get('min')}")
+            logger.info(f"  Price Max: {limits.get('price', {}).get('max')}")
+            logger.info(f"  Cost Min: {limits.get('cost', {}).get('min')}")
+            logger.info("="*70)
+            
+        except Exception as e:
+            logger.error(f"Error loading market info: {e}")
+    
+    
+    
     def setup_signal_handlers(self):
         """Setup graceful shutdown handlers"""
         def signal_handler(sig, frame):

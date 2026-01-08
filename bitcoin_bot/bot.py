@@ -11,6 +11,9 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
+from trading.strategies import StrategyFactory, StrategyType, StrategyConfig, AdvancedStrategyEngine
+
+
 logger = logging.getLogger(__name__)
 
 # Configuration and Data Classes
@@ -161,6 +164,7 @@ class TradeExecutor:
     def __init__(self, exchange):
         self.exchange = exchange
         self.pair = "BTC/EUR"  # CCXT format
+        
 
     def fetch_current_price(self) -> Tuple[Optional[float], Optional[float]]:
         try:
@@ -204,7 +208,8 @@ class TradeExecutor:
 
     def get_btc_order_book(self):
         try:
-            return self.exchange.fetch_order_book(self.pair)
+            order_book = self.exchange.fetch_order_book(self.pair)
+            return order_book
         except Exception as e:
             logger.error(f"Failed to get order book: {e}")
             return None
@@ -212,34 +217,55 @@ class TradeExecutor:
     def execute_trade(self, volume: float, side: str, price: float) -> bool:
         """Execute trade with operatorId"""
         try:
+            # Validate price
+            if not price or price <= 0:
+                logger.error(f"Invalid price received: {price}")
+                return False
+            
+            # Format manually - Bitvavo wants whole numbers
+            formatted_price = int(round(price, 0))
+            formatted_amount = round(volume, 8)
+            
+            logger.info(f"Attempting {side} order: volume={formatted_amount}, price={formatted_price}")
+            
+            # Bypass CCXT's broken precision formatting
+            # Use decimal_to_precision to force the exact value
+            from ccxt.base.precise import Precise
+            
             order = self.exchange.create_order(
                 symbol=self.pair,
                 type='limit',
                 side=side.lower(),
-                amount=volume,
-                price=price,
+                amount=formatted_amount,
+                price=formatted_price,
                 params={
-                    'operatorId': int(time.time() * 1000)  # Use timestamp as operatorId
+                    'operatorId': int(time.time() * 1000),
+                    'price': str(formatted_price)  # Override in params to force exact value
                 }
             )
-            logger.info(f"Trade executed: {side} {volume} BTC at €{price}")
+            
+            logger.info(f"✅ Trade executed: {side} {formatted_amount} BTC at €{formatted_price}")
             return True
         except Exception as e:
+            self.exchange.verbose = False
             logger.error(f"Trade execution error: {e}")
             return False
 
-    def get_optimal_price(self, order_book: dict, side: str, buffer: float = 0.05) -> Optional[float]:
+    def get_optimal_price(self, order_book: dict, side: str, buffer: float = 1.0) -> Optional[float]:
         """Calculate optimal price from order book"""
         try:
             if not order_book or 'asks' not in order_book or 'bids' not in order_book:
+                logger.error("Order book missing or incomplete")
                 return None
 
             if side == "buy":
                 best_ask = float(order_book['asks'][0][0])
-                return best_ask + buffer  # Add small buffer for buy orders
+                optimal_price = best_ask + buffer
+                return optimal_price
             elif side == "sell":
                 best_bid = float(order_book['bids'][0][0])
-                return best_bid - buffer  # Subtract small buffer for sell orders
+                optimal_price = best_bid - buffer
+                return optimal_price
             return None
             
         except Exception as e:
@@ -339,7 +365,7 @@ class PortfolioAnalyzer:
         eur_percentage = (eur_balance / total_value) if total_value > 0 else 0
         
         # Determine if we're overweight in BTC
-        target_btc_percentage = 0.7  # Target 70% BTC allocation
+        target_btc_percentage = 0.9  # Target 90% BTC allocation
         
         analysis = {
             "total_value": total_value,
@@ -1086,10 +1112,6 @@ class EnhancedTradingBot:
             
             # Generate enhanced signal
             signal = self.generate_enhanced_signal(indicators)
-            
-            # Log signal details for debugging
-            logger.info(f"Generated signal: {signal.action.value.upper()} (confidence: {signal.confidence:.2f})")
-            logger.info(f"Signal reasoning: {', '.join(signal.reasoning[:2])}")
             
             # Risk assessment
             if signal.action != TradingAction.HOLD:

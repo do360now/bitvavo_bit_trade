@@ -19,9 +19,9 @@ API_DOMAIN = "https://api.bitvavo.com"
 
 # Allocation strategy for portfolio management
 ALLOCATIONS = {
-    "HODL": float(os.getenv("ALLOC_HODL", "0.7")),
-    "YIELD": float(os.getenv("ALLOC_YIELD", "0.2")),
-    "TRADING": float(os.getenv("ALLOC_TRADING", "0.1")),
+    "HODL": float(os.getenv("ALLOC_HODL", "0.9")),
+    "YIELD": float(os.getenv("ALLOC_YIELD", "0.01")),
+    "TRADING": float(os.getenv("ALLOC_TRADING", "0.09")),
 }
 
 # Initial BTC balance
