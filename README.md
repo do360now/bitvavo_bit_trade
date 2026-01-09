@@ -1,293 +1,234 @@
-# 🤖 Bitcoin Trading Bot - Bitvavo Edition
+# Bitvavo Bitcoin Trading Bot
 
-An advanced, AI-powered Bitcoin trading bot with machine learning capabilities, risk management, and comprehensive market analysis. Built specifically for the Bitvavo exchange with enhanced features for automated Bitcoin accumulation.
+A high-performance asynchronous Bitcoin trading bot for the Bitvavo exchange, built with sentiment analysis, technical indicators, and risk management.
 
-## 🚀 Features
+## Features
 
-### Core Trading Features
-- **Automated Bitcoin Trading** on Bitvavo exchange
-- **Smart Position Sizing** with risk-adjusted calculations
-- **Advanced Order Management** with timeout handling and fill tracking
-- **15-minute Trading Intervals** with precise scheduling
-- **Multi-layered Risk Management** including peak avoidance and macro risk analysis
+- **Async/Await Architecture**: Non-blocking I/O for high-performance trading
+- **Technical Indicators**: RSI, MACD, Bollinger Bands, Moving Averages, VWAP
+- **Sentiment Analysis**: Real-time news sentiment tracking
+- **Risk Management**: Position sizing, stop-loss orders, portfolio allocation
+- **Performance Tracking**: Win rate, Sharpe ratio, drawdown analysis
+- **Order Management**: Limit orders with automatic timeout cancellation
+- **Rate Limiting**: Bitvavo API rate limit compliance with circuit breaker
+- **Comprehensive Logging**: Detailed execution logs for debugging
 
-### Advanced AI & ML Features
-- **Machine Learning Engine** that learns from past trades
-- **Peak Avoidance System** to prevent buying at local tops
-- **Adaptive Position Sizing** based on performance and market conditions
-- **News Sentiment Analysis** with macro-economic risk assessment
-- **On-chain Analysis** including Bitcoin network metrics
+## Structure
 
-### Risk Management
-- **Dynamic Stop-loss** based on market volatility
-- **Risk-off Detection** using news analysis
-- **Liquidation Cascade Prevention**
-- **Portfolio Allocation Controls** (max 25% per trade)
-- **Daily Trade Limits** to prevent overtrading
-
-### Monitoring & Analytics
-- **Real-time Performance Tracking** with Sharpe ratio, drawdown analysis
-- **Comprehensive Logging** of all decisions and trades
-- **Web-based Metrics Server** (Prometheus compatible)
-- **Trade Session Management** with daily counters
-- **Order History Tracking** with detailed fill analysis
-
-## 📊 Performance Metrics
-
-The bot tracks and optimizes based on:
-- **Win Rate**: Percentage of profitable trades
-- **Sharpe Ratio**: Risk-adjusted returns
-- **Maximum Drawdown**: Worst peak-to-trough decline
-- **Fill Rate**: Percentage of orders successfully executed
-- **Average Fill Time**: Speed of order execution
-
-## 🛠️ Installation
-
-### Prerequisites
-- Python 3.8+
-- Bitvavo API credentials
-- Bitcoin node (optional, for on-chain analysis)
-- News API key (optional, for enhanced sentiment analysis)
-
-### Dependencies
-```bash
-pip install ccxt pandas numpy scikit-learn nltk yfinance requests python-dotenv tenacity
+```
+CMC_BITVAVO_BIT_TRADE/
+├── main.py                    # Main bot entry point
+├── bitvavo_api.py            # Enhanced Bitvavo API client with async support
+├── order_manager.py          # Order placement and tracking
+├── trade_executor.py         # Balance and price management
+├── data_manager.py           # OHLC and price history management
+├── performance_tracker.py    # Performance metrics and reporting
+├── indicators.py             # Technical indicators and sentiment analysis
+├── circuit_breaker.py        # Circuit breaker pattern for resilience
+├── logger_config.py          # Logging configuration
+├── requirements.txt          # Python dependencies
+├── .env.template             # Environment configuration template
+└── README.md                 # This file
 ```
 
-### Setup
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd bitcoin-trading-bot
-```
+## Installation
 
-2. Create environment file:
-```bash
-cp .env.example .env
-```
+1. **Clone the repository**
+   ```bash
+   cd /home/cmc/git/Bit/CMC_BITVAVO_BIT_TRADE
+   ```
 
-3. Configure your `.env` file:
-```env
-BITVAVO_API_KEY=your_api_key_here
-BITVAVO_API_SECRET=your_api_secret_here
-NEWS_API_KEY=your_news_api_key_here
-RPC_USER=your_bitcoin_node_user
-RPC_PASSWORD=your_bitcoin_node_password
-RPC_HOST=localhost
-RPC_PORT=8332
-```
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-4. Initialize the bot:
+3. **Configure environment**
+   ```bash
+   cp .env.template .env
+   # Edit .env with your Bitvavo API credentials
+   ```
+
+4. **Set up API credentials**
+   - Create API keys at https://bitvavo.com/en/account/api
+   - Add to `.env`:
+     ```
+     BITVAVO_API_KEY=your_key_here
+     BITVAVO_API_SECRET=your_secret_here
+     ```
+
+## Usage
+
+### Running the Bot
+
 ```bash
 python3 main.py
-```
-
-## 📈 Usage
-
-### Basic Operation
-```bash
-# Run the trading bot
-python3 main.py
-
-# Check status only
-python3 main.py status
-
-# Show help
-python3 main.py help
 ```
 
 ### Configuration
 
-Key settings in `config.py`:
-- `MAX_DAILY_TRADES`: Maximum trades per day (default: 8)
-- `BASE_POSITION_PCT`: Base position size as % of balance (default: 8%)
-- `MIN_EUR_FOR_TRADE`: Minimum EUR needed to trade (default: €10)
-- `GLOBAL_TRADE_COOLDOWN`: Cooldown between trades (default: 180s)
+Edit `.env` file to customize:
+- API credentials
+- News API key (for sentiment analysis)
+- Bitcoin node connection (for on-chain analysis)
+- Logging level
 
-### Trading Strategies
+## How It Works
 
-The bot includes three trading modes:
+### Strategy Flow
 
-1. **Standard Bot**: Basic technical analysis with risk management
-2. **Enhanced Bot**: Adds ML learning and adaptive features
-3. **Ultimate Adaptive Bot**: Full AI with peak avoidance and comprehensive analytics
+1. **Fetch Market Data**
+   - Current price from Bitvavo ticker
+   - Order book depth
+   - OHLCV candle data
 
-## 🧠 AI & Machine Learning
+2. **Calculate Indicators**
+   - RSI (overbought/oversold levels)
+   - MACD (trend direction)
+   - Bollinger Bands (volatility)
+   - Moving Averages (trend)
+   - VWAP (volume-weighted price)
 
-### Learning Engine
-- **Random Forest Classifier** for trade success prediction
-- **Feature Engineering** using 12+ market indicators
-- **Continuous Learning** from trade outcomes
-- **Performance-based Adaptation** of position sizes
+3. **Analyze Sentiment**
+   - Fetch recent news articles
+   - Calculate sentiment score
+   - Assess market risk-off probability
 
-### Peak Avoidance System
-- **Historical Pattern Analysis** to identify price peaks
-- **Real-time Peak Detection** using multiple algorithms
-- **Adaptive Entry Strategies** to avoid buying at tops
-- **Pattern Database** that grows with market experience
+4. **Decision Making**
+   - Combine indicators with sentiment
+   - Generate buy/sell/hold signals
+   - Size positions based on risk
 
-### Risk Analysis
-- **Macro-economic News Monitoring** for risk-off events
-- **Market Correlation Analysis** with traditional assets
-- **Volatility Regime Detection** for adaptive strategies
-- **Liquidation Cascade Prevention** using volume/price patterns
+5. **Execute Trades**
+   - Place limit orders at optimal prices
+   - Track order status
+   - Update performance metrics
 
-## 📊 Monitoring
+6. **Monitor & Log**
+   - Check pending orders
+   - Update equity curve
+   - Log all decisions
 
-### Web Interface
-Access real-time metrics at:
-- **Health Check**: `http://localhost:8082/health`
-- **Prometheus Metrics**: `http://localhost:8082/metrics`
-- **JSON Stats**: `http://localhost:8082/stats`
+### Trading Signals
 
-### Log Files
-- `trading_bot.log`: Main application logs
-- `bot_logs.csv`: Detailed trading decisions and market data
-- `order_history.json`: Complete order tracking
-- `enhanced_decisions.json`: AI decision logs
-- `risk_decisions.json`: Risk analysis logs
+**BUY Signal:**
+- RSI < 30 (oversold)
+- Positive sentiment
+- Sufficient EUR balance
 
-## 🔧 Architecture
+**SELL Signal:**
+- RSI > 70 (overbought)
+- BTC holdings to sell
 
-### Core Components
+**HOLD Signal:**
+- Neutral indicators
+- No strong signals
 
-```
-├── main.py                     # Main application entry point
-├── trading_bot.py              # Core trading logic
-├── enhanced_trading_bot.py     # ML-enhanced trading
-├── complete_integration.py     # Ultimate adaptive bot
-├── order_manager.py            # Order execution and tracking
-├── trade_executor.py           # Exchange interface
-├── data_manager.py             # Data storage and retrieval
-├── indicators.py               # Technical and sentiment analysis
-├── onchain_analyzer.py         # Bitcoin network analysis
-├── peak_avoidance_system.py    # Peak detection and avoidance
-├── performance_tracker.py      # Portfolio performance analysis
-├── metrics_server.py           # Web-based monitoring
-└── config.py                   # Configuration management
-```
+## API Integration
 
-### Data Flow
+### Bitvavo API Methods
 
-1. **Market Data Collection**: Price, volume, news, on-chain metrics
-2. **Analysis Pipeline**: Technical indicators, sentiment, ML predictions
-3. **Decision Engine**: Risk assessment, position sizing, trade signals
-4. **Order Management**: Smart order placement with timeout handling
-5. **Performance Tracking**: Real-time P&L, risk metrics, trade analysis
+The bot uses asynchronous wrappers around the Bitvavo API:
 
-## ⚙️ Configuration Options
-
-### Trading Parameters
 ```python
-TRADING_PARAMS = {
-    'USE_STOP_LOSS': True,
-    'STOP_LOSS_PERCENT': 0.03,      # 3% stop loss
-    'USE_TAKE_PROFIT': True,
-    'TAKE_PROFIT_PERCENT': 0.08,    # 8% take profit
-    'MAX_POSITION_SIZE': 0.15,      # 15% max position
-    'MIN_TRADE_VOLUME': 0.0001,     # Minimum BTC trade size
-}
+await bitvavo_api.get_ticker_async(symbol)      # Current price
+await bitvavo_api.get_order_book_async(symbol)  # Order book
+await bitvavo_api.get_ohlcv_async(symbol)       # Candle data
+await bitvavo_api.get_balance_async()           # Account balance
+await bitvavo_api.place_order_async(order_data) # Place order
+await bitvavo_api.get_order_async(order_id)     # Order status
+await bitvavo_api.cancel_order_async(market, id)# Cancel order
 ```
 
-### Risk Management
-```python
-ENHANCED_RISK_PARAMS = {
-    'BASE_STOP_LOSS_PCT': 0.03,
-    'MAX_RISK_OFF_THRESHOLD': 0.6,
-    'HIGH_VOLATILITY_THRESHOLD': 0.05,
-    'MIN_CONFIDENCE_THRESHOLD': 60.0,
-}
+## Performance Metrics
+
+The bot tracks:
+- **Win Rate**: Percentage of profitable trades
+- **Sharpe Ratio**: Risk-adjusted returns
+- **Max Drawdown**: Largest peak-to-trough decline
+- **Fill Rate**: Percentage of orders successfully filled
+- **Average Fill Time**: Time from placement to execution
+
+## Logging
+
+Logs are output to:
+- Console (INFO level and above)
+- `trading_bot.log` file (DEBUG level and above)
+
+Log levels controlled via `.env`:
+```
+LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
 ```
 
-### News Analysis
-```python
-NEWS_CONFIG = {
-    'MAX_NEWS_ARTICLES': 20,
-    'NEWS_CACHE_MINUTES': 30,
-    'RISK_OFF_WEIGHT': 2.0,
-    'MACRO_NEWS_WEIGHT': 2.0,
-}
+## Error Handling
+
+- **Circuit Breaker**: Stops API calls after 5 consecutive failures, 5-minute timeout
+- **Rate Limiting**: Bitvavo API rate limit compliance with exponential backoff
+- **Order Timeouts**: Automatic cancellation of orders older than specified timeout
+- **Graceful Degradation**: Continues with neutral sentiment if news fetch fails
+
+## Development
+
+### Running Tests
+
+```bash
+python3 test_suite.py        # Unit tests
+python3 test_integration.py  # Integration tests
 ```
 
-## 📚 API Reference
+### Code Quality
 
-### TradingBot Class
-```python
-bot = TradingBot(data_manager, trade_executor, onchain_analyzer, order_manager)
+Run the code quality analyzer:
 
-# Execute trading strategy
-bot.execute_strategy()
-
-# Check order status
-bot.check_pending_orders()
-
-# Get performance summary
-status = bot.get_trading_status_summary()
+```bash
+python3 code_quality_analyzer.py
 ```
 
-### Enhanced Features
-```python
-# Enhance existing bot with ML
-enhanced_bot = enhance_existing_bot(original_bot)
+## Security
 
-# Run enhanced strategy
-enhanced_bot.execute_enhanced_strategy()
+- API credentials never logged or exposed
+- Credentials cleared from memory on cleanup
+- HMAC-SHA256 request signing
+- Timestamp validation on all requests
+- Rate limiting to prevent abuse
 
-# Get ML performance metrics
-performance = enhanced_bot.get_performance_summary()
+## Troubleshooting
+
+### Connection Issues
 ```
+ERROR: Failed to authenticate with Bitvavo
+```
+- Verify API credentials in `.env`
+- Check API key has correct permissions
+- Ensure IP is whitelisted on Bitvavo account
 
-## 🚨 Risk Warnings
+### Insufficient Balance
+```
+WARNING: Insufficient EUR balance for trading
+```
+- Add funds to your Bitvavo account
+- Reduce position size in configuration
+- Check for locked funds in pending orders
 
-- **Trading Risk**: Cryptocurrency trading involves substantial risk of loss
-- **API Security**: Keep your API keys secure and use IP restrictions
-- **Start Small**: Begin with small position sizes to test the system
-- **Monitor Actively**: Regularly check bot performance and logs
-- **Backup Important**: Keep backups of configuration and historical data
+### No Trading Signals
+- Bot may be in HOLD state (normal)
+- Indicators may not align with trade conditions
+- Check logs for signal details
 
-## 🤝 Contributing
+## Contributing
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature-name`
-3. Commit changes: `git commit -am 'Add feature'`
-4. Push to branch: `git push origin feature-name`
-5. Submit a Pull Request
+Improvements welcome:
+- Additional indicators
+- Improved sentiment analysis
+- Better risk management
+- Performance optimizations
 
-### Development Guidelines
-- Follow PEP 8 style guidelines
-- Add comprehensive logging for new features
-- Include unit tests for critical components
-- Update documentation for API changes
+## License
 
-## 📄 License
+See LICENSE file
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## Resources
 
-## ⚠️ Disclaimer
-
-This software is for educational and research purposes. The authors are not responsible for any financial losses incurred through the use of this bot. Always do your own research and never invest more than you can afford to lose.
-
-## 🙏 Acknowledgments
-
-- [CCXT](https://github.com/ccxt/ccxt) for exchange connectivity
-- [Bitvavo](https://bitvavo.com) for reliable API services
-- [scikit-learn](https://scikit-learn.org/) for machine learning tools
-- The Bitcoin and cryptocurrency community for inspiration
-
-## 📞 Support
-
-- **Documentation**: Check the inline code documentation
-- **Issues**: Report bugs via GitHub Issues
-- **Discussions**: Join community discussions in GitHub Discussions
-- **Security**: Report security issues privately to maintainers
-
----
-
-If you find this trading bot useful and profitable, please consider making a donation. 
-
-## Donations
-
-**BTC: bc1qyxdhqef7tszr75wy6y3w7rdfpr9y00cg6w0e8e**
-
----
-**Happy Trading! 🚀📈**
+- [Bitvavo API Documentation](https://docs.bitvavo.com/)
+- [Technical Analysis](https://en.wikipedia.org/wiki/Technical_analysis)
+- [Sentiment Analysis](https://newsapi.org/)

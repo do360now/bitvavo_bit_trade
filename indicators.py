@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import os
 import logging
 from dotenv import load_dotenv
@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import requests
 from tenacity import retry, wait_exponential, stop_after_attempt
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import threading
 import nltk
 import yfinance as yf
 
@@ -81,11 +82,41 @@ NEWS_CACHE_DURATION = timedelta(minutes=60)  # Reduced cache time for faster upd
 
 # Market data cache for correlations
 market_data_cache = {"timestamp": None, "data": None}
-MARKET_CACHE_DURATION = timedelta(minutes=45)
+MARKET_CACHE_DURATION = timedelta(minutes=30)
+
+
+def fetch_enhanced_news_with_timeout(
+    top_n: int = 20, timeout_sec: int = 30
+) -> Optional[List[dict]]:
+    """
+    Wrapper for fetch_enhanced_news with timeout protection using threading
+    """
+    result = [None]
+    error = [None]
+
+    def fetch_thread():
+        try:
+            result[0] = _fetch_enhanced_news_impl(top_n)
+        except Exception as e:
+            error[0] = e
+
+    thread = threading.Thread(target=fetch_thread, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_sec)
+
+    if thread.is_alive():
+        logger.error(f"News fetching timed out after {timeout_sec} seconds")
+        return None
+
+    if error[0]:
+        logger.error(f"Error in news fetching: {error[0]}")
+        return None
+
+    return result[0]
 
 
 @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(5))
-def fetch_enhanced_news(top_n: int = 20) -> Optional[List[dict]]:
+def _fetch_enhanced_news_impl(top_n: int = 20) -> Optional[List[dict]]:
     """
     Fetch latest news using enhanced keywords for macro-economic events.
     Returns up to top_n articles with enhanced filtering.
@@ -143,6 +174,12 @@ def fetch_enhanced_news(top_n: int = 20) -> Optional[List[dict]]:
     logger.info(f"Fetched {len(sorted_articles)} unique articles")
 
     return sorted_articles[:top_n]
+
+
+# Backward compatibility alias
+def fetch_enhanced_news(top_n: int = 20) -> Optional[List[dict]]:
+    """Backward compatible wrapper for fetch_enhanced_news_with_timeout"""
+    return fetch_enhanced_news_with_timeout(top_n, timeout_sec=30)
 
 
 def calculate_enhanced_sentiment(articles: Optional[List[dict]]) -> Dict[str, float]:
@@ -279,10 +316,10 @@ def get_market_correlations() -> Dict[str, float]:
 
         # Calculate BTC returns with fixed warning
         if "BTC-EUR" not in data.columns:
-            logger.warning("BTC/EUR data not available, trying BTC-EUR fallback")
-            if "BTC-EUR" in data.columns:
-                logger.info("Using BTC-EUR as fallback for correlation analysis")
-                btc_returns = data["BTC-EUR"].pct_change(fill_method=None).dropna()
+            logger.warning("BTC-EUR data not available, trying BTC-USD fallback")
+            if "BTC-USD" in data.columns:
+                logger.info("Using BTC-USD as fallback for correlation analysis")
+                btc_returns = data["BTC-USD"].pct_change(fill_method=None).dropna()
             else:
                 logger.warning("No BTC data available for correlation analysis")
                 return {"SPY": 0.0, "DXY": 0.0, "GOLD": 0.0}
@@ -291,7 +328,7 @@ def get_market_correlations() -> Dict[str, float]:
 
         # Calculate correlations for each asset
         for ticker, name in tickers.items():
-            if ticker in ["BTC-EUR", "BTC-EUR"]:  # Skip BTC itself
+            if ticker in ["BTC-EUR", "BTC-USD"]:  # Skip BTC itself
                 continue
 
             try:

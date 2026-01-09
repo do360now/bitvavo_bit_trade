@@ -1,0 +1,20 @@
+[flake8]
+# Match Black's line length (88 chars vs flake8 default 79)
+max-line-length = 88
+
+# Ignore whitespace before colon (Black's style)
+extend-ignore = E203, W503
+
+# Directories to exclude
+exclude = 
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    .pytest_cache,
+    .mypy_cache
+
+# File patterns to exclude
+per-file-ignores =
+    __init__.py: F401
+    test_*.py: F401, F841

@@ -2,28 +2,26 @@ import json
 import numpy as np
 from typing import Dict
 from datetime import datetime
-try:
-    from utils.logger import logger
-except ImportError:
-    try:
-        from utils.logger import logger
-    except ImportError:
-        import logging
-        logger = logging.getLogger(__name__)
+from logger_config import logger
 
 
 class PerformanceTracker:
     """Track and analyze trading bot performance"""
 
     def __init__(
-        self, initial_btc_balance: float = 0.0, initial_eur_balance: float = 0.0
+        self,
+        initial_btc_balance: float = 0.0,
+        initial_eur_balance: float = 0.0,
+        performance_file: str = None,
+        load_history: bool = True,
     ):
         self.initial_btc_balance = initial_btc_balance
         self.initial_eur_balance = initial_eur_balance
         self.trades = []
         self.equity_curve = []
-        self.performance_file = "./performance_history.json"
-        self._load_performance_history()
+        self.performance_file = performance_file or "./performance_history.json"
+        if load_history:
+            self._load_performance_history()
 
     def _load_performance_history(self):
         """Load performance history from file"""
@@ -179,33 +177,66 @@ class PerformanceTracker:
         return abs(np.min(drawdowns)) if np.isfinite(drawdowns).any() else 0.0
 
     def calculate_win_rate(self) -> float:
-        """Calculate win rate from trades"""
+        """Calculate win rate from trades using FIFO matching"""
         if not self.trades:
             return 0.0
 
-        # Group trades by buy/sell pairs
-        buy_trades = [t for t in self.trades if t["side"] == "buy"]
-        sell_trades = [t for t in self.trades if t["side"] == "sell"]
+        # Sort trades by timestamp
+        sorted_trades = sorted(self.trades, key=lambda t: t["timestamp"])
 
-        if not sell_trades:
-            return 0.0  # No completed cycles
-
+        # FIFO queue: [(price, volume_remaining, timestamp)]
+        buy_queue = []
         wins = 0
-        total = len(sell_trades)
+        total_sells = 0
 
-        for sell in sell_trades:
-            # Find average buy price before this sell
-            relevant_buys = [
-                b for b in buy_trades if b["timestamp"] < sell["timestamp"]
-            ]
-            if relevant_buys:
-                avg_buy_price = sum(
-                    b["price"] * b["volume"] for b in relevant_buys
-                ) / sum(b["volume"] for b in relevant_buys)
-                if sell["price"] > avg_buy_price:
-                    wins += 1
+        for trade in sorted_trades:
+            if trade["side"] == "buy":
+                # Add to buy queue
+                buy_queue.append(
+                    {
+                        "price": trade["price"],
+                        "volume": trade["volume"],
+                        "timestamp": trade["timestamp"],
+                    }
+                )
 
-        return wins / total if total > 0 else 0.0
+            elif trade["side"] == "sell":
+                # Match sell against oldest buys (FIFO)
+                sell_volume_remaining = trade["volume"]
+                total_cost = 0.0
+                total_volume_matched = 0.0
+
+                while sell_volume_remaining > 0 and buy_queue:
+                    oldest_buy = buy_queue[0]
+
+                    # Determine how much we can match
+                    volume_to_match = min(sell_volume_remaining, oldest_buy["volume"])
+
+                    # Calculate cost basis
+                    total_cost += volume_to_match * oldest_buy["price"]
+                    total_volume_matched += volume_to_match
+
+                    # Update volumes
+                    sell_volume_remaining -= volume_to_match
+                    oldest_buy["volume"] -= volume_to_match
+
+                    # Remove buy from queue if fully consumed
+                    if oldest_buy["volume"] <= 0:
+                        buy_queue.pop(0)
+
+                # Calculate if this sell was profitable
+                if total_volume_matched > 0:
+                    avg_buy_price = total_cost / total_volume_matched
+                    if trade["price"] > avg_buy_price:
+                        wins += 1
+                    total_sells += 1
+
+                    logger.debug(
+                        f"Sell @ €{trade['price']:.2f} vs Avg Buy @ €{avg_buy_price:.2f} - "
+                        f"{'WIN' if trade['price'] > avg_buy_price else 'LOSS'}"
+                    )
+
+        return wins / total_sells if total_sells > 0 else 0.0
 
     def get_trade_statistics(self) -> Dict:
         """Get comprehensive trade statistics"""
