@@ -19,8 +19,6 @@ from order_manager import OrderManager
 from trade_executor import TradeExecutor
 from data_manager import DataManager
 from performance_tracker import PerformanceTracker
-from bot_state_manager import BotStateManager
-from atomic_trade_manager import AtomicTradeManager
 from indicators import (
     calculate_rsi,
     calculate_macd,
@@ -50,7 +48,7 @@ class BitcoinAccumulationBot:
         # PEAK DETECTION for maximum EUR generation
         self.peak_detection_lookback = 20  # Track recent price peaks
         self.min_profit_to_consider_sell = 9.0  # At least 9% profit
-        self.aggressive_profit_target = 14.0  # Sell at 14%+ regardless
+        self.aggressive_profit_target = 8.0  # Sell at 8%+ regardless
         
         # Track price peaks and momentum shifts
         self.recent_prices = []
@@ -58,41 +56,22 @@ class BitcoinAccumulationBot:
         self.peak_price = 0.0
         self.peak_timestamp = 0
         
-        # Average buy tracking - NOW PERSISTENT!
-        self.state_manager = BotStateManager("./bot_state.json")
-        self.avg_buy_price = self.state_manager.get_avg_buy_price()
-        self.total_btc_bought = self.state_manager.get_total_btc_bought()
-        self.peak_price = self.state_manager.get_peak_price()
+        # Average buy tracking
+        self.avg_buy_price = 0.0
+        self.total_btc_bought = 0.0
 
         # Initialize components
         try:
             api_key, api_secret = load_api_credentials()
             self.bitvavo_api = EnhancedBitvavoAPI(api_key, api_secret)
+            self.order_manager = OrderManager(self.bitvavo_api)
             self.trade_executor = TradeExecutor(self.bitvavo_api)
-            self.order_manager = OrderManager(self.bitvavo_api, self.trade_executor)
-            self.atomic_trader = AtomicTradeManager(
-                self.order_manager,
-                self.state_manager,
-                self.trade_executor
-            )
             self.data_manager = DataManager("price_history.json", "bot_logs.csv")
             self.performance_tracker = PerformanceTracker()
             self._load_price_history()
-            
 
             logger.info("✅ Bitcoin accumulation bot initialized (PEAK SELLER)")
             logger.info("🎯 Goal: Sell at peaks → Generate EUR → Buy dips → Accumulate MORE BTC")
-
-            pending = self.atomic_trader.get_pending_summary()
-            if pending['total_pending'] > 0:
-                logger.warning(f"⚠️  Found {pending['total_pending']} pending state updates from previous run")
-            
-            # Show current state
-            if self.avg_buy_price > 0:
-                logger.info(f"📊 Loaded state: Avg Buy €{self.avg_buy_price:,.2f}, "
-                           f"Total Bought {self.total_btc_bought:.8f} BTC")
-            else:
-                logger.info("📊 Starting fresh - no previous state found")
 
         except Exception as e:
             logger.error(f"Failed to initialize bot: {e}")
@@ -137,7 +116,6 @@ class BitcoinAccumulationBot:
         if current_price > self.peak_price:
             self.peak_price = current_price
             self.peak_timestamp = time.time()
-            self.state_manager.update_peak(current_price)
         
         if len(self.recent_prices) < 10 or len(self.recent_macd_values) < 5:
             return False, "Insufficient data"
@@ -222,24 +200,22 @@ class BitcoinAccumulationBot:
 
     def run(self):
         """Main bot loop"""
-        try:
-            logger.info("🤖 Starting Bitcoin accumulation bot...")
-            save_counter = 0
+        logger.info("🚀 Starting Bitcoin accumulation bot (PEAK SELLER)...")
+        save_counter = 0
 
+        try:
             while self.running:
-                # Execute strategy
-                self.execute_strategy()
-                
-                # NEW: Process filled orders and apply state updates
-                self.atomic_trader.process_filled_orders()
-                
-                # Periodic saves
+                try:
+                    self.execute_strategy()
+                except Exception as e:
+                    logger.error(f"Strategy execution failed: {e}", exc_info=True)
+
                 save_counter += 1
-                if save_counter >= 3:
+                if save_counter >= 12:
                     self._save_price_history()
                     save_counter = 0
 
-                time.sleep(300)  # 5 minutes
+                time.sleep(300)
 
         except KeyboardInterrupt:
             logger.info("Bot interrupted by user")
@@ -318,47 +294,55 @@ class BitcoinAccumulationBot:
             )
 
             # Execute trades
-            # === BUY LOGIC ===
             if buy_signal:
                 logger.info("🟢 BUY SIGNAL - Accumulating Bitcoin on dip!")
                 position_size = self.trade_executor.calculate_position_size(
-                    eur_balance, current_price, risk_percent=25.0
+                    eur_balance, current_price, risk_percent=95.0
                 )
                 
                 if position_size > 0:
                     optimal_price = self.trade_executor.get_optimal_price(order_book, "buy")
                     if optimal_price:
-                        # NEW: Use atomic trader
-                        order_id = self.atomic_trader.execute_buy(
-                            volume=position_size,
-                            price=optimal_price,
-                            market=self.market
-                        )
+                        total_cost = (self.avg_buy_price * self.total_btc_bought) + (optimal_price * position_size)
+                        self.total_btc_bought += position_size
+                        self.avg_buy_price = total_cost / self.total_btc_bought
                         
+                        order_id = self.order_manager.place_limit_order(
+                            volume=position_size,
+                            side="buy",
+                            price=optimal_price,
+                            market=self.market,
+                        )
                         if order_id:
-                            logger.info(f"✅ BUY ORDER PLACED | {position_size:.8f} BTC @ €{optimal_price:,.2f}")
-                            logger.info(f"   ⏳ State will update after order fills...")
+                            logger.info(f"✅ BUY ORDER | {position_size:.8f} BTC @ €{optimal_price:,.2f}")
+                            logger.info(f"   New Avg Buy: €{self.avg_buy_price:,.2f}")
 
-            # === SELL LOGIC ===
             elif sell_signal:
                 sellable_btc = btc_balance - self.min_btc_reserve
                 sell_amount = min(sellable_btc * 0.5, sellable_btc)
                 
                 logger.info(f"🔴 SELL SIGNAL - {sell_reason}")
+                logger.info(f"   🎯 Rebuy target: €{rebuy_target:,.2f} (for MORE BTC)")
+                logger.info(f"   Selling: {sell_amount:.8f} BTC")
                 
                 optimal_price = self.trade_executor.get_optimal_price(order_book, "sell")
                 if optimal_price and sell_amount > self.trade_executor.min_order_size:
-                    # NEW: Use atomic trader
-                    order_id = self.atomic_trader.execute_sell(
-                        volume=sell_amount,
-                        price=optimal_price,
-                        market=self.market
-                    )
+                    # Calculate potential EUR and BTC accumulation
+                    eur_generated = sell_amount * optimal_price
+                    potential_btc_rebuy = eur_generated / rebuy_target
+                    btc_gain = potential_btc_rebuy - sell_amount
                     
+                    logger.info(f"   💵 Will generate: €{eur_generated:.2f}")
+                    logger.info(f"   🎁 Potential gain: +{btc_gain:.8f} BTC if rebuy at €{rebuy_target:,.2f}")
+                    
+                    order_id = self.order_manager.place_limit_order(
+                        volume=sell_amount,
+                        side="sell",
+                        price=optimal_price,
+                        market=self.market,
+                    )
                     if order_id:
-                        logger.info(f"✅ SELL ORDER PLACED | {sell_amount:.8f} BTC @ €{optimal_price:,.2f}")
-                        logger.info(f"   ⏳ State will update after order fills...")
-
+                        logger.info(f"✅ SELL ORDER | {sell_amount:.8f} BTC @ €{optimal_price:,.2f}")
 
             else:
                 # Not buying or selling
@@ -385,8 +369,6 @@ class BitcoinAccumulationBot:
         logger.info("🧹 Cleaning up...")
         try:
             self._save_price_history()
-            self.state_manager.save_state()
-            self.state_manager.print_statistics()
             self.bitvavo_api.close()
             logger.info("✅ Bot shutdown complete")
         except Exception as e:
@@ -402,14 +384,14 @@ class BitcoinAccumulationBot:
 def main():
     """Main entry point"""
     bot = BitcoinAccumulationBot()
-    
+
     def signal_handler(signum, frame):
         logger.info(f"Signal {signum} received")
         bot.stop()
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     try:
         bot.run()
     except Exception as e:
