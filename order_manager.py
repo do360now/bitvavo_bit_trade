@@ -187,37 +187,84 @@ class OrderManager:
     #         return None
 
     def check_order_status(self, order_id: str) -> Optional[Dict]:
-        """Check status of a specific order (sync)"""
+        """
+        Check status of a specific order (handles instant fills)
+        """
         try:
+            # First, check if already in filled orders
+            if order_id in self.filled_orders:
+                return {"status": "filled", "data": self.filled_orders[order_id]}
+            
+            # Try to get from active orders
             response = self.bitvavo_api.get_order_async(order_id)
-
+            
             if response:
-                status = response.get("status", "unknown")
-
-                if status == "filled":
+                status = response.get("status", "unknown").lower()
+                
+                # Bitvavo returns "closed" for filled orders, not "filled"
+                if status in ["filled", "closed"]:
                     filled_volume = float(response.get("filledAmount", 0))
                     if filled_volume > 0:
                         self.filled_orders[order_id] = response
                         if order_id in self.pending_orders:
                             del self.pending_orders[order_id]
+                        logger.debug(f"Order status: {order_id} - {status}")
                         logger.info(f"✅ Order {order_id[:8]}... FILLED: {filled_volume:.8f} BTC")
                         return {"status": "filled", "data": response}
-
-                elif status == "canceled":
+                
+                elif status in ["canceled", "cancelled"]:
                     self.cancelled_orders[order_id] = response
                     if order_id in self.pending_orders:
                         del self.pending_orders[order_id]
+                    logger.debug(f"Order status: {order_id} - {status}")
                     logger.info(f"⚠️  Order {order_id[:8]}... CANCELLED")
                     return {"status": "cancelled", "data": response}
-
+                
                 else:
+                    logger.debug(f"Order status: {order_id} - {status}")
                     return {"status": status, "data": response}
-
+            
             return None
-
+        
         except Exception as e:
-            logger.error(f"Failed to check order status for {order_id}: {e}")
-            return None
+            error_msg = str(e)
+            
+            # If "No active order found" - check history for instant fill
+            if "240" in error_msg or "No active order found" in error_msg:
+                logger.debug(f"Order {order_id[:8]} not active - checking history for instant fill")
+                
+                # Search recent history (last 7 days)
+                history = self.bitvavo_api.get_order_from_history(
+                    order_id=order_id,
+                    lookback_days=7
+                )
+                
+                if history:
+                    status = history.get('status')
+                    
+                    if status in ['filled', 'closed']:
+                        self.filled_orders[order_id] = history
+                        if order_id in self.pending_orders:
+                            del self.pending_orders[order_id]
+                        
+                        filled_volume = float(history.get('filledAmount', 0))
+                        logger.info(f"⚡ INSTANT FILL: {order_id[:8]} - {filled_volume:.8f} BTC")
+                        return {"status": "filled", "data": history}
+                    
+                    elif status in ['canceled', 'cancelled']:
+                        self.cancelled_orders[order_id] = history
+                        if order_id in self.pending_orders:
+                            del self.pending_orders[order_id]
+                        logger.info(f"Order {order_id[:8]} was cancelled")
+                        return {"status": "cancelled", "data": history}
+                
+                # Not found in recent history either
+                logger.warning(f"Order {order_id[:8]} not found in active or recent history")
+                return None
+            
+            else:
+                logger.error(f"Failed to check order {order_id}: {e}")
+                return None
 
     def cancel_order(self, order_id: str, market: str = "BTC-EUR") -> bool:
         """Cancel an open order (sync)"""
@@ -252,7 +299,7 @@ class OrderManager:
                 if status_info:
                     status = status_info["status"]
 
-                    if status == "filled":
+                    if status in ["filled", "closed"]:
                         results["filled"].append(order_id)
                     elif status == "cancelled":
                         results["cancelled"].append(order_id)

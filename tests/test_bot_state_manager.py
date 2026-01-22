@@ -11,6 +11,7 @@ from datetime import datetime
 # Add parent directory to path so we can import bot_state_manager
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from circuit_breaker import CircuitBreaker
 from bot_state_manager import BotStateManager
 
 

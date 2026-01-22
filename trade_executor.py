@@ -246,7 +246,7 @@ class TradeExecutor:
                 if asks:
                     best_ask = float(asks[0][0])
                     # Place buy order slightly below best ask
-                    target_price = best_ask * 0.999
+                    target_price = best_ask * 0.9999
                     # Round to valid tick
                     return self.round_to_tick(target_price)
 

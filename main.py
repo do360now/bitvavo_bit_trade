@@ -45,7 +45,7 @@ class BitcoinAccumulationBot:
         
         # Accumulation parameters
         self.min_btc_reserve = 0.01
-        self.buy_rsi_threshold = 35  # Buy dips
+        self.buy_rsi_threshold = 30  # Buy dips (lowered from 35 to catch more opportunities)
         
         # PEAK DETECTION for maximum EUR generation
         self.peak_detection_lookback = 20  # Track recent price peaks
@@ -55,6 +55,7 @@ class BitcoinAccumulationBot:
         # Track price peaks and momentum shifts
         self.recent_prices = []
         self.recent_macd_values = []
+        self.recent_signal_values = []  # Track signal line for crossover detection
         self.peak_price = 0.0
         self.peak_timestamp = 0
         
@@ -129,9 +130,7 @@ class BitcoinAccumulationBot:
         self.recent_prices.append(current_price)
         self.recent_prices = self.recent_prices[-self.peak_detection_lookback:]
         
-        # Track MACD momentum
-        self.recent_macd_values.append(macd)
-        self.recent_macd_values = self.recent_macd_values[-10:]
+        # Note: MACD tracking is now done in execute_strategy to avoid duplication
         
         # Update peak tracking
         if current_price > self.peak_price:
@@ -303,14 +302,90 @@ class BitcoinAccumulationBot:
             logger.info(f"📈 INDICATORS | RSI: {rsi:.1f} | MACD: {macd:.2f} (Signal: {signal:.2f})")
             logger.info(f"💰 PROFIT | Avg Buy: €{self.avg_buy_price:,.2f} | Current: €{current_price:,.2f} | Profit: {profit_percent:.2f}%")
 
-            # === BUY LOGIC (accumulate on dips) ===
+            # === BUY LOGIC (Enhanced with multiple signals) ===
             min_eur_for_order = self.trade_executor.min_order_size * current_price * 1.05
             
-            buy_signal = (
-                rsi < self.buy_rsi_threshold and 
-                eur_balance > min_eur_for_order and
-                sentiment > -0.3
-            )
+            # Track MACD and signal for crossover detection
+            self.recent_macd_values.append(macd)
+            self.recent_signal_values.append(signal)
+            self.recent_macd_values = self.recent_macd_values[-10:]
+            self.recent_signal_values = self.recent_signal_values[-10:]
+            
+            # === SIGNAL 1: RSI Oversold ===
+            rsi_oversold = rsi < self.buy_rsi_threshold
+            
+            # === SIGNAL 2: MACD Bullish Crossover ===
+            macd_bullish_cross = False
+            if len(self.recent_macd_values) >= 2 and len(self.recent_signal_values) >= 2:
+                # MACD just crossed above signal (or is above)
+                macd_bullish_cross = (
+                    macd > signal and  # Currently above
+                    macd > -100 and  # Not in extreme downtrend
+                    self.recent_macd_values[-2] <= self.recent_signal_values[-2]  # Was below or equal recently
+                )
+            
+            # === SIGNAL 3: MACD Improving ===
+            macd_improving = False
+            if len(self.recent_macd_values) >= 3:
+                macd_improving = (
+                    self.recent_macd_values[-1] > self.recent_macd_values[-2] and
+                    self.recent_macd_values[-2] > self.recent_macd_values[-3]
+                )
+            
+            # === SAFETY FILTERS ===
+            safe_to_buy = True
+            safety_blocks = []
+            
+            # Safety 1: Not in extreme downtrend
+            if abs(macd) > 200:
+                safe_to_buy = False
+                safety_blocks.append(f"Extreme MACD ({macd:.1f})")
+            
+            # Safety 2: Not making aggressive lower lows (mild check)
+            if len(self.price_history) >= 10:
+                recent_low = min(self.price_history[-5:])
+                previous_low = min(self.price_history[-10:-5])
+                if recent_low < previous_low * 0.98:  # More than 2% lower
+                    safe_to_buy = False
+                    safety_blocks.append("Sharp lower lows")
+            
+            # Safety 3: Sentiment not extremely negative
+            if sentiment < -0.5:
+                safe_to_buy = False
+                safety_blocks.append(f"Extreme negative sentiment ({sentiment:.2f})")
+            
+            # === BUY DECISION ===
+            # Buy if: (RSI oversold OR MACD crossover OR MACD improving) AND safety checks pass AND have funds
+            buy_trigger = rsi_oversold or macd_bullish_cross or (macd_improving and macd > -50)
+            has_funds = eur_balance > min_eur_for_order
+            
+            buy_signal = buy_trigger and safe_to_buy and has_funds
+            
+            # Build reason string
+            if buy_signal:
+                signals_active = []
+                if rsi_oversold:
+                    signals_active.append(f"RSI {rsi:.1f}")
+                if macd_bullish_cross:
+                    signals_active.append(f"MACD cross {macd:.1f}>{signal:.1f}")
+                if macd_improving:
+                    signals_active.append("MACD improving")
+                buy_reason = f"✅ {', '.join(signals_active)}"
+            elif not safe_to_buy:
+                buy_reason = f"⚠️  Blocked: {', '.join(safety_blocks)}"
+            elif not has_funds:
+                buy_reason = f"⚠️  Insufficient funds (need €{min_eur_for_order:.2f})"
+            elif not buy_trigger:
+                reasons = []
+                if not rsi_oversold:
+                    reasons.append(f"RSI {rsi:.1f} > {self.buy_rsi_threshold}")
+                if not macd_bullish_cross:
+                    reasons.append("No MACD crossover")
+                if not macd_improving:
+                    reasons.append("MACD not improving")
+                buy_reason = f"⏸️  Waiting: {', '.join(reasons)}"
+            else:
+                buy_reason = "⏸️  Waiting for signal"
             
             # === SELL LOGIC (peak detection for max EUR generation) ===
             sell_signal, sell_reason = self._detect_peak_reversal(
@@ -320,7 +395,7 @@ class BitcoinAccumulationBot:
             # Execute trades
             # === BUY LOGIC ===
             if buy_signal:
-                logger.info("🟢 BUY SIGNAL - Accumulating Bitcoin on dip!")
+                logger.info(f"🟢 BUY SIGNAL - {buy_reason}")
                 position_size = self.trade_executor.calculate_position_size(
                     eur_balance, current_price, risk_percent=25.0
                 )
@@ -361,11 +436,8 @@ class BitcoinAccumulationBot:
 
 
             else:
-                # Not buying or selling
-                if profit_percent > 0:
-                    logger.info(f"⏸️  {sell_reason}")
-                else:
-                    logger.info(f"⏸️  HOLD - Waiting for dip (RSI < {self.buy_rsi_threshold})")
+                # Not buying or selling - show appropriate message
+                logger.info(buy_reason)
 
             # Update performance
             self.performance_tracker.update_equity(btc_balance, eur_balance, current_price)
