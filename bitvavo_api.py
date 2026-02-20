@@ -431,6 +431,35 @@ class BitvavoAPI:
         """Close connections (CCXT handles this)"""
         logger.info("Closing Bitvavo API")
 
+    def _make_request(self, endpoint, params=None):
+        """
+        Make a request to Bitvavo API
+        
+        Args:
+            endpoint: API endpoint (e.g., 'markets')
+            params: Optional parameters dict
+        
+        Returns:
+            Response data
+        """
+        try:
+            if hasattr(self, 'ccxt_exchange'):
+                # Using CCXT
+                if endpoint == 'markets':
+                    return self.ccxt_exchange.fetch_markets()
+                elif endpoint.startswith('ticker'):
+                    symbol = params.get('market', 'BTC/EUR')
+                    return self.ccxt_exchange.fetch_ticker(symbol)
+            else:
+                # Fallback to direct API call
+                url = f"https://api.bitvavo.com/v2/{endpoint}"
+                response = requests.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"API request failed for {endpoint}: {e}")
+            return None
+
 
 # Aliases for backwards compatibility
 class EnhancedBitvavoAPI(BitvavoAPI):

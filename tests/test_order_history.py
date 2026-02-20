@@ -3,12 +3,15 @@
 Test Bitvavo Order History
 Run this to verify order history fetching works
 """
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bitvavo_api import EnhancedBitvavoAPI
 from datetime import datetime, timedelta
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 
 
 def print_header(text):

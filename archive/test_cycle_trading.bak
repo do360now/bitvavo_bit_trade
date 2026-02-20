@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""
+Tests for Fixed Cycle Trading Deep Module
+
+Tests the complete cycle-aware logic including:
+- Euphoria detection and capital preservation
+- Golden rule floor recognition
+- Profit taking to build dry powder
+- Graduated positioning across FULL cycle
+"""
+
+import unittest
+import sys
+import os
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from cycle_trading_module import CycleAwareTrading, TradingDecision
+
+
+class TestEuphoriaDetection(unittest.TestCase):
+    """Test euphoria detection and capital preservation"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading()
+    
+    def test_euphoria_detected_near_ath(self):
+        """Test that prices near ATH trigger euphoria phase"""
+        # €114k is ATH, €100k is 12% down (within 15%)
+        context = self.trading.get_market_context(100000)
+        
+        self.assertEqual(context['phase'], 'euphoria')
+        self.assertEqual(context['risk_level'], 'EXTREME')
+    
+    def test_minimal_buying_in_euphoria(self):
+        """Test that bot uses MINIMAL positions in euphoria"""
+        # At €100k (euphoria), with €1000 available
+        decision = self.trading.decide(
+            price=100000,
+            btc_held=0,
+            eur_available=1000,
+            avg_buy_price=0
+        )
+        
+        # Should buy very small amount (0.05x multiplier)
+        if decision.should_buy:
+            position_eur = decision.btc_amount * 100000
+            # 0.05x on 10% = 0.5% = €5 on €1000
+            self.assertLess(position_eur, 20, "Euphoria position should be MINIMAL")
+    
+    def test_profit_taking_in_euphoria(self):
+        """Test that bot takes profits in euphoria"""
+        # Bought at €50k, now at €110k = +120% profit in euphoria
+        decision = self.trading.decide(
+            price=110000,
+            btc_held=0.1,
+            eur_available=100,
+            avg_buy_price=50000
+        )
+        
+        # Should sell to take profits
+        self.assertTrue(decision.should_sell, "Should take profits in euphoria")
+        self.assertGreater(decision.btc_amount, 0)
+        self.assertIn('profit', decision.reasoning.lower())
+    
+    def test_capital_preservation_limit(self):
+        """Test that capital preservation limits work"""
+        # Already deployed 20% in euphoria (at limit)
+        decision = self.trading.decide(
+            price=110000,
+            btc_held=0.018,  # €1,980 worth @ €110k = 19.8% of €10k
+            eur_available=8000,
+            avg_buy_price=50000,
+            total_capital=10000
+        )
+        
+        # Should NOT buy more (at capital limit)
+        # Note: might sell for profit taking, but shouldn't buy
+        if decision.should_buy:
+            self.fail("Should not buy more when at capital limit in euphoria")
+
+
+class TestGoldenRuleFloor(unittest.TestCase):
+    """Test golden rule floor recognition"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading()
+    
+    def test_golden_floor_is_low_risk(self):
+        """Test that €60k (near golden floor €58,100) is LOW risk"""
+        context = self.trading.get_market_context(60000)
+        
+        self.assertEqual(context['risk_level'], 'LOW')
+        self.assertLess(context['distance_from_floor_pct'], 0.10)
+    
+    def test_aggressive_at_golden_floor(self):
+        """Test aggressive buying near golden rule floor"""
+        decision = self.trading.decide(
+            price=60000,
+            btc_held=0,
+            eur_available=1000,
+            avg_buy_price=0
+        )
+        
+        # Should buy aggressively (in accumulation phase)
+        self.assertTrue(decision.should_buy)
+        position_eur = decision.btc_amount * 60000
+        # Should be significant (2.5x multiplier in accumulation)
+        self.assertGreater(position_eur, 100, "Should buy aggressively at golden floor")
+    
+    def test_accumulation_phase_detected(self):
+        """Test that €60k triggers accumulation phase"""
+        context = self.trading.get_market_context(60000)
+        
+        self.assertEqual(context['phase'], 'accumulation')
+
+
+class TestLateBullDetection(unittest.TestCase):
+    """Test late bull phase detection"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading()
+    
+    def test_late_bull_at_81k(self):
+        """Test that €81k is late bull phase (HIGH risk)"""
+        context = self.trading.get_market_context(81000)
+        
+        # €81k is 29% down from €114k ATH
+        self.assertEqual(context['phase'], 'late_bull')
+        self.assertEqual(context['risk_level'], 'HIGH')
+    
+    def test_cautious_buying_in_late_bull(self):
+        """Test that buying in late bull is minimal"""
+        decision = self.trading.decide(
+            price=81000,
+            btc_held=0,
+            eur_available=1000,
+            avg_buy_price=0
+        )
+        
+        # Should buy cautiously (0.1x multiplier)
+        if decision.should_buy:
+            position_eur = decision.btc_amount * 81000
+            # 0.1x on 10% = 1% = €10 on €1000
+            self.assertLess(position_eur, 30, "Late bull should be VERY cautious")
+    
+    def test_profit_taking_in_late_bull(self):
+        """Test profit taking when appropriate in late bull"""
+        # Bought at €30k, now at €81k = +170% profit
+        decision = self.trading.decide(
+            price=81000,
+            btc_held=0.1,
+            eur_available=100,
+            avg_buy_price=30000
+        )
+        
+        # Should take some profit
+        self.assertTrue(decision.should_sell)
+        self.assertIn('profit', decision.reasoning.lower())
+
+
+class TestCorrectionPhase(unittest.TestCase):
+    """Test correction phase behavior"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading()
+    
+    def test_correction_detected(self):
+        """Test that mid-range prices trigger correction"""
+        # €70k is 39% down from ATH
+        context = self.trading.get_market_context(70000)
+        
+        self.assertEqual(context['phase'], 'correction')
+    
+    def test_moderate_buying_in_correction(self):
+        """Test moderate buying in correction"""
+        decision = self.trading.decide(
+            price=70000,
+            btc_held=0,
+            eur_available=1000,
+            avg_buy_price=0
+        )
+        
+        # Should buy moderately (0.5x multiplier)
+        if decision.should_buy:
+            position_eur = decision.btc_amount * 70000
+            # 0.5x on 10% = 5% = €50 on €1000
+            self.assertGreater(position_eur, 30)
+            self.assertLess(position_eur, 100)
+    
+    def test_diamond_hands_in_correction(self):
+        """Test holding underwater positions in correction"""
+        # Bought at €81k, now at €70k = -13.6% loss
+        decision = self.trading.decide(
+            price=70000,
+            btc_held=0.05,
+            eur_available=100,
+            avg_buy_price=81000
+        )
+        
+        # Should NOT sell (diamond hands)
+        self.assertFalse(decision.should_sell)
+
+
+class TestDeepAccumulation(unittest.TestCase):
+    """Test deep accumulation zone"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading()
+    
+    def test_deep_accumulation_at_34k(self):
+        """Test that €34k is deep accumulation"""
+        context = self.trading.get_market_context(34000)
+        
+        self.assertEqual(context['phase'], 'accumulation')
+        self.assertEqual(context['risk_level'], 'LOW')
+    
+    def test_maximum_aggression_at_bottom(self):
+        """Test maximum position sizing in accumulation"""
+        decision = self.trading.decide(
+            price=34000,
+            btc_held=0,
+            eur_available=1000,
+            avg_buy_price=0
+        )
+        
+        # Should buy very aggressively (2.5x multiplier)
+        self.assertTrue(decision.should_buy)
+        position_eur = decision.btc_amount * 34000
+        # 2.5x on 10% = 25% = €250 on €1000
+        self.assertGreater(position_eur, 150, "Should be very aggressive at bottom")
+
+
+class TestCapitalPreservation(unittest.TestCase):
+    """Test capital preservation across phases"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading(capital_preservation_mode=True)
+    
+    def test_euphoria_capital_limit(self):
+        """Test 20% capital limit in euphoria"""
+        # Already at 20% deployed
+        decision = self.trading.decide(
+            price=110000,
+            btc_held=0.018,  # €1,980 @ €110k = 19.8%
+            eur_available=8020,
+            avg_buy_price=50000,
+            total_capital=10000
+        )
+        
+        # Should not buy more (at limit)
+        if decision.should_buy:
+            self.fail("Should respect 20% capital limit in euphoria")
+    
+    def test_accumulation_capital_limit(self):
+        """Test 90% capital limit in accumulation"""
+        # Can deploy up to 90% in accumulation
+        decision = self.trading.decide(
+            price=34000,
+            btc_held=0.20,  # €6,800 @ €34k = 68%
+            eur_available=3200,
+            avg_buy_price=40000,
+            total_capital=10000
+        )
+        
+        # Should still be able to buy (under 90% limit)
+        self.assertTrue(decision.should_buy)
+
+
+class TestRealWorldScenarios(unittest.TestCase):
+    """Test realistic scenarios"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading()
+    
+    def test_what_kraken_bot_does_right(self):
+        """Test that fixed module matches Kraken bot at €60k"""
+        # Scenario: €60k with dry powder available
+        decision = self.trading.decide(
+            price=60000,
+            btc_held=0.048,  # Similar to Kraken bot
+            eur_available=20.51,  # Kraken bot amount
+            avg_buy_price=50000
+        )
+        
+        # Should recognize low risk
+        context = self.trading.get_market_context(60000)
+        self.assertEqual(context['risk_level'], 'LOW')
+        
+        # Should be in accumulation phase
+        self.assertEqual(context['phase'], 'accumulation')
+    
+    def test_what_old_bot_did_wrong(self):
+        """Test that fixed module prevents buying at €81k"""
+        # Scenario: €81k (late bull)
+        decision = self.trading.decide(
+            price=81000,
+            btc_held=0,
+            eur_available=3000,
+            avg_buy_price=0
+        )
+        
+        # Should be very cautious
+        if decision.should_buy:
+            position_eur = decision.btc_amount * 81000
+            # Should be MINIMAL (0.1x = 1% of €3000 = €30)
+            self.assertLess(position_eur, 50, "Should be minimal at €81k")
+        
+        # Should recognize high risk
+        context = self.trading.get_market_context(81000)
+        self.assertEqual(context['risk_level'], 'HIGH')
+    
+    def test_complete_cycle_simulation(self):
+        """Test behavior across a complete cycle"""
+        total_capital = 10000
+        eur = 10000
+        btc = 0
+        avg_buy = 0
+        
+        # Simulate price journey
+        prices = [
+            (30000, "Early bull"),
+            (50000, "Mid bull"),
+            (81000, "Late bull - DON'T BUY MUCH"),
+            (110000, "Euphoria - TAKE PROFITS"),
+            (95000, "Distribution"),
+            (70000, "Correction"),
+            (60000, "Golden floor - BUY"),
+            (45000, "Mid correction - BUY"),
+            (34000, "Bottom - BUY AGGRESSIVELY"),
+        ]
+        
+        for price, description in prices:
+            decision = self.trading.decide(
+                price=price,
+                btc_held=btc,
+                eur_available=eur,
+                avg_buy_price=avg_buy,
+                total_capital=total_capital
+            )
+            
+            print(f"\n{description} @ €{price:,}")
+            print(f"  Phase: {decision.phase}")
+            print(f"  Risk: {decision.risk_level}")
+            print(f"  Action: {'BUY' if decision.should_buy else 'SELL' if decision.should_sell else 'HOLD'}")
+            
+            if decision.should_buy and eur > 0:
+                cost = decision.btc_amount * price
+                if cost <= eur:
+                    # Execute buy
+                    if avg_buy == 0:
+                        avg_buy = price
+                    else:
+                        total_cost = (avg_buy * btc) + cost
+                        avg_buy = total_cost / (btc + decision.btc_amount)
+                    
+                    btc += decision.btc_amount
+                    eur -= cost
+                    print(f"  Bought: €{cost:.2f}")
+            
+            elif decision.should_sell and btc > 0:
+                # Execute sell
+                sell_amount = min(decision.btc_amount, btc)
+                proceeds = sell_amount * price
+                btc -= sell_amount
+                eur += proceeds
+                print(f"  Sold: €{proceeds:.2f}")
+            
+            print(f"  Balance: €{eur:.2f} EUR + {btc:.4f} BTC")
+        
+        # Final check
+        final_value = eur + (btc * 34000)  # Value at bottom
+        print(f"\n{'='*60}")
+        print(f"Final value @ €34k: €{final_value:.2f}")
+        print(f"Initial capital: €{total_capital:.2f}")
+        print(f"Change: {(final_value/total_capital - 1)*100:+.1f}%")
+        
+        # Should have more EUR than initial (from profit taking)
+        # And BTC accumulated at better prices
+        self.assertGreater(btc, 0, "Should have accumulated BTC")
+
+
+class TestEdgeCases(unittest.TestCase):
+    """Test edge cases"""
+    
+    def setUp(self):
+        self.trading = CycleAwareTrading()
+    
+    def test_never_crashes(self):
+        """Test that module never crashes with bad inputs"""
+        test_cases = [
+            (0, 0, 0, 0),
+            (-100, -1, -1000, -50000),
+            (1000000, 100, 100000, 10000),
+            (0.01, 0.00000001, 0.01, 0),
+        ]
+        
+        for price, btc, eur, avg in test_cases:
+            decision = self.trading.decide(price, btc, eur, avg)
+            self.assertIsNotNone(decision)
+    
+    def test_respects_minimum_trade_size(self):
+        """Test that minimum trade size is respected"""
+        decision = self.trading.decide(
+            price=60000,
+            btc_held=0,
+            eur_available=10,  # Only €10
+            avg_buy_price=0
+        )
+        
+        # Should not buy (below €15 minimum)
+        self.assertFalse(decision.should_buy)
+
+
+def run_tests():
+    """Run all tests"""
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    
+    suite.addTests(loader.loadTestsFromTestCase(TestEuphoriaDetection))
+    suite.addTests(loader.loadTestsFromTestCase(TestGoldenRuleFloor))
+    suite.addTests(loader.loadTestsFromTestCase(TestLateBullDetection))
+    suite.addTests(loader.loadTestsFromTestCase(TestCorrectionPhase))
+    suite.addTests(loader.loadTestsFromTestCase(TestDeepAccumulation))
+    suite.addTests(loader.loadTestsFromTestCase(TestCapitalPreservation))
+    suite.addTests(loader.loadTestsFromTestCase(TestRealWorldScenarios))
+    suite.addTests(loader.loadTestsFromTestCase(TestEdgeCases))
+    
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    
+    print("\n" + "=" * 70)
+    print("FIXED MODULE TEST SUMMARY")
+    print("=" * 70)
+    print(f"Tests run: {result.testsRun}")
+    print(f"Successes: {result.testsRun - len(result.failures) - len(result.errors)}")
+    print(f"Failures: {len(result.failures)}")
+    print(f"Errors: {len(result.errors)}")
+    print("=" * 70)
+    
+    if result.wasSuccessful():
+        print("\n✅ ALL TESTS PASSED - Fixed module is working correctly!")
+        print("\nKey improvements verified:")
+        print("  ✓ Euphoria detection prevents buying at €81k")
+        print("  ✓ Golden rule floor recognized (€60k = LOW risk)")
+        print("  ✓ Profit taking builds dry powder")
+        print("  ✓ Capital preservation across phases")
+        print("  ✓ Graduated positioning across FULL cycle")
+    
+    return result.wasSuccessful()
+
+
+if __name__ == "__main__":
+    import sys
+    success = run_tests()
+    sys.exit(0 if success else 1)
