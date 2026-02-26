@@ -249,8 +249,8 @@ class TradingBot:
             
             try:
                 # Execute buy
-                order_id = self.atomic.atomic_buy(
-                    btc_amount=decision.btc_amount,
+                order_id = self.atomic.execute_buy(
+                    volume=decision.btc_amount,
                     price=decision.price
                 )
                 if order_id:
