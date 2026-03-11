@@ -271,6 +271,45 @@ class BitvavoAPI:
         except Exception as e:
             logger.error(f"Failed to get ticker: {e}")
             return None
+
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
+    def get_ohlcv_async(self, symbol: str, interval: int = 3600) -> Optional[List]:
+        """
+        Get OHLCV candle data.
+
+        Args:
+            symbol: Trading pair (e.g., "BTC-EUR")
+            interval: Timeframe in seconds (3600 = 1 hour)
+
+        Returns:
+            List of [timestamp, open, high, low, close, volume]
+        """
+        try:
+            # Convert interval to CCXT timeframe
+            timeframe_map = {
+                60: '1m',
+                300: '5m',
+                900: '15m',
+                3600: '1h',
+                14400: '4h',
+                86400: '1d',
+            }
+            timeframe = timeframe_map.get(interval, '1h')
+
+            # CCXT expects BTC/EUR format
+            ccxt_symbol = symbol.replace('-', '/')
+
+            # Fetch OHLCV data (limit to 100 candles)
+            ohlcv = self.exchange.fetch_ohlcv(ccxt_symbol, timeframe, limit=100)
+
+            if ohlcv:
+                logger.debug(f"Fetched {len(ohlcv)} {timeframe} candles for {symbol}")
+                return ohlcv
+            return []
+
+        except Exception as e:
+            logger.error(f"Failed to fetch OHLCV: {e}")
+            return None
     
     def get_order_history_async(self, order_id: str, market: str = "BTC-EUR") -> Optional[Dict]:
         """Get order from history (for filled/cancelled orders)"""
