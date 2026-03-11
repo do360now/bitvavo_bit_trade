@@ -71,6 +71,7 @@ class TradingBot:
         self.api = EnhancedBitvavoAPI(BITVAVO_API_KEY, BITVAVO_API_SECRET)
         self.state = BotStateManager()
         self.executor = TradeExecutor(self.api)
+        self.executor.initialize()  # Fetch market specs (tick size, min order)
         self.orders = OrderManager(self.api, self.executor)
         self.atomic = AtomicTradeManager(self.orders, self.state, self.executor)
         self.performance = PerformanceTracker(
@@ -89,17 +90,109 @@ class TradingBot:
         else:
             self.trading = None
             logger.info("ℹ️  Cycle-aware trading disabled")
-        
+
+        # Circuit breaker tracking
+        self.iteration = 0
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 3
+        self.last_circuit_breaker_trigger = None
+        self.circuit_breaker_wait_count = 0  # Track consecutive CB waits
+
         # Bot control
         self.running = True
-        self.iteration = 0
-        
+
         # Graceful shutdown
         signal.signal(signal.SIGINT, self._stop)
         signal.signal(signal.SIGTERM, self._stop)
-        
+
+        # Run startup health check
+        if not self._health_check():
+            logger.error("❌ Startup health check failed - fix issues before running bot")
+            logger.error("💡 Check API credentials and network connectivity")
+            return
+
         logger.info("✅ Bot initialization complete!")
-    
+
+    def _health_check(self) -> bool:
+        """
+        Verify API connectivity and credentials before starting.
+        Returns True if health check passes, False otherwise.
+        """
+        logger.info("🔍 Running startup health check...")
+
+        checks = [
+            ("Fetch BTC price", self.executor.get_current_price()),
+            ("Fetch EUR balance", self.executor.get_available_balance("EUR")),
+            ("Fetch BTC balance", self.executor.get_total_btc_balance()),
+        ]
+
+        all_passed = True
+        for check_name, result in checks:
+            if result is None:
+                logger.error(f"❌ Health check failed: {check_name}")
+                all_passed = False
+            else:
+                logger.info(f"✅ {check_name}: OK")
+
+        return all_passed
+
+    def _health_check(self) -> bool:
+        """
+        Run startup health check to verify API connectivity.
+        Returns True if all checks pass, False otherwise.
+        """
+        logger.info("🔍 Running startup health check...")
+
+        checks = {
+            'price': False,
+            'balance_btc': False,
+            'balance_eur': False,
+        }
+
+        # Check 1: Can fetch current price
+        try:
+            price = self.executor.get_current_price()
+            if price and price > 0:
+                checks['price'] = True
+                logger.info(f"  ✅ Price API: €{price:,.2f}")
+            else:
+                logger.error(f"  ❌ Price API: Invalid price returned")
+        except Exception as e:
+            logger.error(f"  ❌ Price API: {e}")
+
+        # Check 2: Can fetch BTC balance
+        try:
+            btc = self.executor.get_total_btc_balance()
+            if btc is not None and btc >= 0:
+                checks['balance_btc'] = True
+                logger.info(f"  ✅ BTC balance: {btc:.8f} BTC")
+            else:
+                logger.error(f"  ❌ BTC balance: Invalid balance returned")
+        except Exception as e:
+            logger.error(f"  ❌ BTC balance: {e}")
+
+        # Check 3: Can fetch EUR balance
+        try:
+            eur = self.executor.get_available_balance("EUR")
+            if eur is not None and eur >= 0:
+                checks['balance_eur'] = True
+                logger.info(f"  ✅ EUR balance: €{eur:,.2f}")
+            else:
+                logger.error(f"  ❌ EUR balance: Invalid balance returned")
+        except Exception as e:
+            logger.error(f"  ❌ EUR balance: {e}")
+
+        # Summary
+        passed = sum(checks.values())
+        total = len(checks)
+
+        if passed == total:
+            logger.info(f"🛡️  Health check passed ({passed}/{total})")
+            return True
+        else:
+            logger.error(f"🛡️  Health check FAILED ({passed}/{total})")
+            return False
+
     def _stop(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"\n🛑 Shutting down (signal {signum})...")
@@ -183,28 +276,47 @@ class TradingBot:
     def _get_market_state(self) -> dict:
         """
         Get current market state.
-        
+
         WHY A DICT:
         - Simple return value
         - No need for a MarketState class (that would be shallow)
         - Easy to extend with new fields
-        
+
         Returns dict with: price, btc, eur
+        Returns None if circuit breaker is open or API fails
         """
         try:
             price = self.executor.get_current_price()
             btc = self.executor.get_total_btc_balance()
             eur = self.executor.get_available_balance("EUR")
-            
-            if price is None:
+
+            # Handle circuit breaker open (returns None)
+            if price is None or btc is None or eur is None:
+                self.consecutive_failures += 1
+                self.last_circuit_breaker_trigger = datetime.now()
+
+                if self.consecutive_failures == 1:
+                    logger.warning("⚠️ Circuit breaker triggered - API unavailable")
+                logger.warning(f"⚠️ Consecutive failures: {self.consecutive_failures}")
+
+                # Exponential backoff: wait longer each failure
+                wait_time = min(60 * self.consecutive_failures, 300)
+                logger.warning(f"💤 Waiting {wait_time}s for recovery...")
+                time.sleep(wait_time)
                 return None
-            
+
+            # Success - reset failure counter
+            if self.consecutive_failures > 0:
+                logger.info(f"✅ API recovered after {self.consecutive_failures} failures")
+                self.consecutive_failures = 0
+
             logger.info(f"💰 BTC: {btc:.8f} | EUR: €{eur:,.2f}")
             logger.info(f"📊 Price: €{price:,.2f}")
-            
+
             return {'price': price, 'btc': btc, 'eur': eur}
-        
+
         except Exception as e:
+            self.consecutive_failures += 1
             logger.error(f"Failed to get market state: {e}")
             return None
     
@@ -230,43 +342,64 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Failed to update performance: {e}")
     
+    TRAILING_STOP_PCT = 0.10  # 10% trailing stop
+
     def _execute_decision(self, decision: TradingDecision, state: dict):
         """
         Execute a trading decision.
-        
+
         WHY THIS IS SIMPLE:
         - Decision object has everything we need
         - Just check buy/sell flags and execute
         - No complex branching logic
-        
+
         DESIGN:
         - TradingDecision is the interface between strategy and execution
         - Clean separation: decide() vs execute()
         """
+        # Check trailing stop BEFORE strategy decision
+        if state['btc'] > 0 and self.state.get_avg_buy_price() > 0:
+            trailing_triggered = self._check_trailing_stop(state)
+            if trailing_triggered:
+                # Trailing stop overrides strategy
+                return
+
         if decision.should_buy:
             logger.info(f"🟢 BUY: {decision.btc_amount:.8f} BTC @ €{decision.price:,.2f}")
             logger.info(f"   Reason: {decision.reasoning}")
-            
+
             try:
+                # Get optimal price from order book for better fill
+                order_book = self.executor.get_order_book(depth=5)
+                exec_price = self.executor.get_optimal_price(order_book, "buy") if order_book else decision.price
+
+                logger.info(f"   📊 Order book price: €{exec_price:,.2f}")
+
                 # Execute buy
                 order_id = self.atomic.execute_buy(
                     volume=decision.btc_amount,
-                    price=decision.price
+                    price=exec_price
                 )
                 if order_id:
                     logger.info(f"✅ Buy order placed: {order_id}")
             except Exception as e:
                 logger.error(f"Failed to execute buy: {e}")
-        
+
         elif decision.should_sell:
             logger.info(f"🔴 SELL: {decision.btc_amount:.8f} BTC @ €{decision.price:,.2f}")
             logger.info(f"   Reason: {decision.reasoning}")
-            
+
             try:
+                # Get optimal price from order book for better fill
+                order_book = self.executor.get_order_book(depth=5)
+                exec_price = self.executor.get_optimal_price(order_book, "sell") if order_book else decision.price
+
+                logger.info(f"   📊 Order book price: €{exec_price:,.2f}")
+
                 # Execute sell
                 order_id = self.atomic.atomic_sell(
                     btc_amount=decision.btc_amount,
-                    price=decision.price
+                    price=exec_price
                 )
                 if order_id:
                     logger.info(f"✅ Sell order placed: {order_id}")
@@ -276,6 +409,114 @@ class TradingBot:
         else:
             logger.info(f"⏸️  HOLD - {decision.reasoning}")
     
+    def _check_trailing_stop(self, state: dict) -> bool:
+        """
+        Check if trailing stop should trigger.
+
+        TRAILING STOP LOGIC:
+        - Track peak price since position opened
+        - If price drops X% from peak, sell (stop loss)
+        - This locks in profits while allowing upside
+
+        Returns True if trailing stop triggered and sell executed
+        """
+        TRAILING_STOP_PCT = 0.15  # 15% drop from peak = sell
+
+        current_price = state['price']
+        avg_buy_price = self.state.get_avg_buy_price()
+        btc_held = state['btc']
+
+        if btc_held <= 0 or avg_buy_price <= 0:
+            return False
+
+        # Get peak price (highest price since we bought)
+        peak_price = self.state.get_peak_price()
+
+        # Update peak if current price is higher
+        if current_price > peak_price:
+            self.state.update_peak_price(current_price)
+            peak_price = current_price
+
+        # Calculate drop from peak
+        if peak_price <= 0:
+            return False
+
+        drawdown_from_peak = (peak_price - current_price) / peak_price
+
+        # Trigger trailing stop
+        if drawdown_from_peak >= TRAILING_STOP_PCT:
+            profit_from_buy = (current_price - avg_buy_price) / avg_buy_price
+
+            logger.warning(f"🛡️  TRAILING STOP TRIGGERED!")
+            logger.warning(f"   Peak: €{peak_price:,.2f} | Current: €{current_price:,.2f}")
+            logger.warning(f"   Drawdown: {drawdown_from_peak:.1%} | Profit: {profit_from_buy:.1%}")
+
+            try:
+                # Execute sell at market (use current price for fast fill)
+                order_id = self.atomic.atomic_sell(
+                    btc_amount=btc_held,
+                    price=current_price
+                )
+                if order_id:
+                    logger.warning(f"✅ Trailing stop SELL executed: {order_id}")
+                    return True
+            except Exception as e:
+                logger.error(f"❌ Trailing stop failed: {e}")
+
+        return False
+
+    def _check_trailing_stop(self, state: dict) -> bool:
+        """
+        Check if trailing stop should trigger.
+        Protects profits by selling when price drops from peak.
+
+        Trailing stop: If price rises X%, then drops Y%, sell.
+        This lets profits run while protecting against reversals.
+        """
+        TRAILING_STOP_PERCENT = 0.10  # 10% trailing stop
+
+        current_price = state['price']
+        avg_buy = self.state.get_avg_buy_price()
+        peak_price = self.state.get_peak_price()
+
+        # No position or no profit yet
+        if avg_buy <= 0 or current_price <= avg_buy:
+            # Update peak price
+            if current_price > peak_price:
+                self.state.state['peak_price'] = current_price
+                self.state.save_state()
+            return False
+
+        # Update peak if new high
+        if current_price > peak_price:
+            self.state.state['peak_price'] = current_price
+            self.state.save_state()
+            logger.debug(f"📈 New peak price: €{peak_price:,.2f}")
+            return False
+
+        # Calculate drawdown from peak
+        if peak_price > 0:
+            drawdown = (peak_price - current_price) / peak_price
+
+            if drawdown >= TRAILING_STOP_PERCENT:
+                profit_pct = (current_price - avg_buy) / avg_buy
+                logger.warning(f"🛡️  TRAILING STOP: Price dropped {drawdown:.1%} from peak €{peak_price:,.2f}")
+                logger.warning(f"   Current: €{current_price:,.2f} | Profit: {profit_pct:.1%}")
+
+                # Execute trailing stop sell
+                try:
+                    order_id = self.atomic.atomic_sell(
+                        btc_amount=state['btc'],
+                        price=current_price
+                    )
+                    if order_id:
+                        logger.warning(f"✅ Trailing stop executed: {order_id}")
+                        return True
+                except Exception as e:
+                    logger.error(f"Failed to execute trailing stop: {e}")
+
+        return False
+
     def _log_iteration_start(self):
         """Log iteration header."""
         logger.info("=" * 70)

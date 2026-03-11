@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 from typing import Optional, List, Dict, Tuple
 import os
-import logging
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import requests
@@ -12,12 +11,10 @@ import threading
 import nltk
 import yfinance as yf
 
+from logger_config import logger
+
 # Load environment variables
 load_dotenv()
-
-# Configure logger
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # News API key
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")

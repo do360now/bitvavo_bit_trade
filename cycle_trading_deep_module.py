@@ -34,11 +34,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 from enum import Enum
-import logging
 
-# Simple logger setup (replace with your logger_config import in production)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from logger_config import logger
 
 
 @dataclass

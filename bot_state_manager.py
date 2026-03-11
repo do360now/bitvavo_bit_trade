@@ -109,29 +109,73 @@ class BotStateManager:
         # Calculate fee if not provided
         if fee_eur == 0.0:
             fee_eur = price * volume * 0.0025  # 0.25% fee
-        
+
         # Track the sell
         self.state['last_sell_price'] = price
         self.state['last_sell_timestamp'] = datetime.now().timestamp()
         self.state['total_round_trips'] += 1
         self.state['total_fees_eur'] += fee_eur
-        
+
         # Calculate actual profit (after fees)
         gross_proceeds = price * volume
         net_proceeds = gross_proceeds - fee_eur
         cost_basis = self.state['avg_buy_price'] * volume
         actual_profit = net_proceeds - cost_basis
-        
+
         # If profitable sell after fees, count as successful
         if actual_profit > 0:
             self.state['successful_round_trips'] += 1
-        
+
         logger.info(f"📊 Sell recorded at €{price:,.2f}")
         logger.info(f"   Gross: €{gross_proceeds:.2f}, Fee: €{fee_eur:.2f}, Net: €{net_proceeds:.2f}")
         logger.info(f"   Profit: €{actual_profit:.2f} ({actual_profit/cost_basis*100:.2f}%)")
         logger.info(f"   Round trips: {self.state['successful_round_trips']}/{self.state['total_round_trips']} successful")
-        
+
         self.save_state()
+
+    def check_trailing_stop(self, current_price: float, trail_pct: float = 0.10) -> Optional[float]:
+        """
+        Check if trailing stop is triggered.
+
+        A trailing stop sells when price drops X% from its all-time peak.
+
+        Args:
+            current_price: Current BTC price
+            trail_pct: Percentage drop from peak to trigger (default 10%)
+
+        Returns:
+            Sell price if trailing stop triggered, None otherwise
+        """
+        peak = self.state.get('peak_price', 0)
+
+        if peak <= 0 or current_price <= 0:
+            return None
+
+        # Update peak if current price is higher
+        if current_price > peak:
+            self.state['peak_price'] = current_price
+            self.state['peak_timestamp'] = datetime.now().timestamp()
+            self.save_state()
+            return None
+
+        # Calculate drop from peak
+        drop_pct = (peak - current_price) / peak
+
+        # Trigger trailing stop if drop exceeds threshold
+        if drop_pct >= trail_pct:
+            logger.warning(f"🛑 TRAILING STOP TRIGGERED!")
+            logger.warning(f"   Peak: €{peak:,.2f} | Current: €{current_price:,.2f}")
+            logger.warning(f"   Drop: {drop_pct:.1%} (threshold: {trail_pct:.1%})")
+            return current_price
+
+        return None
+
+    def update_peak(self, price: float):
+        """Update peak price if current price is higher"""
+        if price > self.state.get('peak_price', 0):
+            self.state['peak_price'] = price
+            self.state['peak_timestamp'] = datetime.now().timestamp()
+            self.save_state()
 
     def get_true_profit_margin(self, current_price: float) -> float:
         """

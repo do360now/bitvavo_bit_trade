@@ -6,6 +6,7 @@ import asyncio
 import time
 from typing import Optional, Dict, List
 from logger_config import logger
+from circuit_breaker import CircuitBreakerException
 
 
 class TradeExecutor:
@@ -25,21 +26,21 @@ class TradeExecutor:
         """Fetch market specifications on startup"""
         try:
             market_info = self.bitvavo_api._make_request(
-                "GET", "markets", {"market": self.market}
+                "markets", {"market": self.market}
             )
-            
+
             if market_info:
                 info = market_info[0] if isinstance(market_info, list) else market_info
-                
+
                 self.tick_size = float(info.get('tickSize', 1.0))
                 self.min_order_value = float(info.get('minOrderInQuoteAsset', 5.0))
                 self.amount_decimals = int(info.get('baseDecimals', 8))
-                
+
                 logger.info(f"Market specs loaded: tick_size=€{self.tick_size}, min_order=€{self.min_order_value}")
             else:
                 logger.warning(f"Could not fetch market info, using defaults")
                 self.tick_size = 1.0  # Default to €1 increments for BTC
-                
+
         except Exception as e:
             logger.error(f"Failed to fetch market specs: {e}")
             self.tick_size = 1.0  # Safe default
@@ -83,6 +84,9 @@ class TradeExecutor:
                 logger.warning("Balance is None")
                 return 0.0
 
+            except CircuitBreakerException as e:
+                logger.error(f"Circuit breaker open: {e}")
+                return None  # Return None to signal circuit breaker is open
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"Balance fetch attempt {attempt + 1} failed: {e}, retrying...")
@@ -108,6 +112,9 @@ class TradeExecutor:
                 logger.warning(f"{asset} asset not found in balance")
                 return 0.0
 
+            except CircuitBreakerException as e:
+                logger.error(f"Circuit breaker open: {e}")
+                return None
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"Balance fetch attempt {attempt + 1} failed: {e}, retrying...")
@@ -131,6 +138,9 @@ class TradeExecutor:
             logger.error("Failed to get current price")
             return None
 
+        except CircuitBreakerException as e:
+            logger.error(f"Circuit breaker open - cannot fetch price: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to fetch current price: {e}")
             return None
@@ -149,6 +159,9 @@ class TradeExecutor:
             logger.error("Failed to get order book")
             return None
 
+        except CircuitBreakerException as e:
+            logger.error(f"Circuit breaker open - cannot fetch order book: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to fetch order book: {e}")
             return None
@@ -245,8 +258,8 @@ class TradeExecutor:
                 asks = order_book.get("asks", [])
                 if asks:
                     best_ask = float(asks[0][0])
-                    # Place buy order slightly below best ask
-                    target_price = best_ask * 0.9999
+                    # Place buy order slightly ABOVE best ask to ensure fill
+                    target_price = best_ask * 1.001
                     # Round to valid tick
                     return self.round_to_tick(target_price)
 
@@ -255,8 +268,8 @@ class TradeExecutor:
                 bids = order_book.get("bids", [])
                 if bids:
                     best_bid = float(bids[0][0])
-                    # Place sell order slightly above best bid
-                    target_price = best_bid * 1.001
+                    # Place sell order slightly BELOW best bid to ensure fill
+                    target_price = best_bid * 0.999
                     # Round to valid tick
                     return self.round_to_tick(target_price)
 

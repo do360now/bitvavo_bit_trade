@@ -125,67 +125,6 @@ class OrderManager:
         except Exception as e:
             logger.error(f"Failed to save order history: {e}")
 
-    # def place_limit_order(
-    #     self, volume: float, side: str, price: float, market: str = "BTC-EUR"
-    # ) -> Optional[str]:
-    #     """Place a limit order (sync)"""
-    #     try:
-    #         # Round to appropriate precision
-    #         volume = round(volume, 8)
-    #         price = round(float(price))
-            
-    #         # Validate
-    #         if volume < 0.0001:
-    #             logger.error(f"Volume {volume:.8f} BTC below minimum")
-    #             return None
-            
-    #         if price <= 0:
-    #             logger.error(f"Invalid price: €{price}")
-    #             return None
-            
-    #         order_value = volume * price
-    #         if order_value < 5.0:
-    #             logger.error(f"Order value €{order_value:.2f} below minimum €5.00")
-    #             return None
-
-    #         logger.info(f"Placing {side.upper()} order: {volume:.8f} BTC @ €{price:.2f}")
-
-    #         # Prepare order data
-    #         order_data = {
-    #             "market": market,
-    #             "side": side,
-    #             "orderType": "limit",
-    #             "amount": f"{volume:.8f}",
-    #             "price": str(int(price)),
-    #             "operatorId": "",
-    #         }
-
-    #         # Place order (sync call despite _async name)
-    #         response = self.bitvavo_api.place_order_async(order_data)
-
-    #         if response and "orderId" in response:
-    #             order_id = response["orderId"]
-
-    #             # Track the order
-    #             self.pending_orders[order_id] = {
-    #                 "timestamp": time.time(),
-    #                 "side": side,
-    #                 "volume": volume,
-    #                 "price": price,
-    #                 "market": market,
-    #                 "status": "pending",
-    #             }
-
-    #             logger.info(f"✅ Order placed successfully: {order_id}")
-    #             return order_id
-    #         else:
-    #             logger.error(f"❌ Failed to place order - API response: {response}")
-    #             return None
-
-    #     except Exception as e:
-    #         logger.error(f"❌ Exception placing order: {e}", exc_info=True)
-    #         return None
-
     def check_order_status(self, order_id: str) -> Optional[Dict]:
         """
         Check status of a specific order (handles instant fills)

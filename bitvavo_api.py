@@ -7,6 +7,7 @@ import ccxt
 from typing import Dict, List, Optional, Any
 from logger_config import logger
 from config import BITVAVO_API_KEY, BITVAVO_API_SECRET
+from circuit_breaker import circuit_breaker
 import time
 
 
@@ -260,6 +261,8 @@ class BitvavoAPI:
             return {}
     
     
+    @circuit_breaker(failure_threshold=5, recovery_timeout=60)
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
     def get_ticker_async(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get ticker data (keeping method name for compatibility)"""
         try:
@@ -298,6 +301,8 @@ class BitvavoAPI:
             return None
     
     
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
     def get_order_book_async(self, symbol: str, depth: int = 10) -> Optional[Dict]:
         """Get order book (keeping method name for compatibility)"""
         try:
@@ -308,6 +313,7 @@ class BitvavoAPI:
             logger.error(f"Failed to get order book: {e}")
             return None
     
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
     def get_balance_async(self) -> Optional[Dict[str, Dict[str, float]]]:
         """Get account balance (keeping method name for compatibility)"""
         try:
@@ -328,6 +334,7 @@ class BitvavoAPI:
             logger.error(f"Failed to get balance: {e}")
             return None
     
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
     def place_order_async(self, order_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Place order (keeping method name for compatibility)
@@ -378,6 +385,7 @@ class BitvavoAPI:
             logger.error(f"Failed to place order: {e}")
             return None
     
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
     def get_order_async(self, order_id: str, market: str = "BTC-EUR") -> Optional[Dict[str, Any]]:
         """
         Get order status (keeping method name for compatibility)
@@ -409,6 +417,8 @@ class BitvavoAPI:
             logger.error(f"Failed to get order {order_id}: {e}")
             return None
     
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
+    @circuit_breaker(failure_threshold=3, recovery_timeout=60)
     def cancel_order_async(self, market: str, order_id: str) -> Optional[Dict[str, Any]]:
         """Cancel order (keeping method name for compatibility)"""
         try:
@@ -443,13 +453,13 @@ class BitvavoAPI:
             Response data
         """
         try:
-            if hasattr(self, 'ccxt_exchange'):
+            if hasattr(self, 'exchange'):
                 # Using CCXT
                 if endpoint == 'markets':
-                    return self.ccxt_exchange.fetch_markets()
+                    return self.exchange.fetch_markets()
                 elif endpoint.startswith('ticker'):
                     symbol = params.get('market', 'BTC/EUR')
-                    return self.ccxt_exchange.fetch_ticker(symbol)
+                    return self.exchange.fetch_ticker(symbol)
             else:
                 # Fallback to direct API call
                 url = f"https://api.bitvavo.com/v2/{endpoint}"
