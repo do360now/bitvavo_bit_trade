@@ -100,9 +100,17 @@ class AccumulationEngine(ProfitEngine):
         self.total_capital = total_capital
         self._tier_spent = {tier[2]: 0.0 for tier in self._PRICE_TIERS}
 
+        # Cooldown tracking: don't spray bullets at the same price
+        self._last_buy_price = 0.0
+        self._last_buy_time = 0.0
+        self._MIN_PRICE_DROP_FOR_REBUY = 0.025   # Need 2.5% drop from last buy
+        self._MIN_HOURS_BETWEEN_BUYS = 4.0        # OR 4 hours must pass
+        self._MIN_COMPOSITE_JUMP = 0.15           # OR composite jumps significantly
+
         logger.info(
             f"AccumulationEngine initialized: base={base_position_pct:.0%}, "
             f"TP=22%, SL=8%, reserve=€{self._RESERVE_EUR}, "
+            f"cooldown={self._MIN_HOURS_BETWEEN_BUYS}h/{self._MIN_PRICE_DROP_FOR_REBUY:.1%}, "
             f"mode=ACCUMULATE"
         )
 
@@ -245,6 +253,37 @@ class AccumulationEngine(ProfitEngine):
         risk_level = self._regime_to_risk(regime)
         drawdown = (self._CYCLE_ATH - price) / self._CYCLE_ATH
 
+        # --- BUY COOLDOWN: Don't spray bullets at the same price ---
+        # After a buy, wait for EITHER:
+        #   a) Price drops 2.5%+ from last buy (new opportunity)
+        #   b) 4+ hours pass (conditions genuinely changed)
+        #   c) Composite jumps significantly (strong new signal)
+        #   d) Price crosses into a new tier (deeper drawdown)
+        import time as _time
+        if self._last_buy_price > 0:
+            price_drop = (self._last_buy_price - price) / self._last_buy_price
+            hours_since = (_time.time() - self._last_buy_time) / 3600
+            composite_jump = composite > (0.08 + self._MIN_COMPOSITE_JUMP)
+            new_tier = self._get_tier_name(drawdown) != self._get_tier_name(
+                (self._CYCLE_ATH - self._last_buy_price) / self._CYCLE_ATH
+            )
+
+            cooldown_met = (
+                price_drop >= self._MIN_PRICE_DROP_FOR_REBUY or  # Price dropped enough
+                hours_since >= self._MIN_HOURS_BETWEEN_BUYS or   # Enough time passed
+                composite_jump or                                  # Strong new signal
+                new_tier                                           # Entered deeper tier
+            )
+
+            if not cooldown_met:
+                logger.info(
+                    f"⏳ COOLDOWN: Last buy at €{self._last_buy_price:,.0f} "
+                    f"({hours_since:.1f}h ago, {price_drop:+.1%} from last). "
+                    f"Need: {self._MIN_PRICE_DROP_FOR_REBUY:.1%} drop OR "
+                    f"{self._MIN_HOURS_BETWEEN_BUYS}h wait"
+                )
+                return None
+
         # --- Minimum signal threshold (much lower than profit engine) ---
         min_signal = 0.08   # Almost any positive signal = buy
         if regime == MacroRegime.CRISIS:
@@ -295,32 +334,36 @@ class AccumulationEngine(ProfitEngine):
         # Signal strength adds 0-50% more
         signal_bonus = max(0, (composite - min_signal) * 2)  # 0 to ~1.8
 
-        final_multiplier = tier_weight * cycle_multiplier * regime_multiplier * (1 + signal_bonus)
-        position_eur = available_after_reserve * self.base_position_pct * final_multiplier
+        # Position sizing: tier weight IS the base allocation
+        # (Don't multiply tier × base_pct — that double-shrinks small accounts)
+        base_eur = available_after_reserve * tier_weight  # e.g. €257 × 25% = €64
+        position_eur = base_eur * cycle_multiplier * regime_multiplier * (1 + signal_bonus)
 
-        # Cap at tier weight × available (don't blow entire stack in one tier)
-        position_eur = min(position_eur, available_after_reserve * tier_weight)
+        # Cap: don't exceed tier allocation (ladder discipline)
+        position_eur = min(position_eur, base_eur)
 
         # Absolute cap
         position_eur = min(position_eur, available_after_reserve * self.max_position_pct)
+
+        # Floor: if we have enough capital, at least do the minimum trade
+        if position_eur < self.min_eur and available_after_reserve >= self.min_eur:
+            # Force minimum trade if signal is there and we can afford it
+            position_eur = self.min_eur
 
         if position_eur < self.min_eur:
             return None
 
         btc_amount = position_eur / price
 
-        # --- Averaging down (much more permissive) ---
+        # --- Averaging down ---
+        # In accumulation mode: we WANT to average down. No penalty.
+        # Only gate: composite must be > 0.05 (not actively bearish)
         if btc_held > 0 and avg_buy_price > 0:
             current_pnl = (price - avg_buy_price) / avg_buy_price
             if current_pnl < -0.10:
-                # In accumulation mode: only need composite > 0.05 to avg down
                 if composite < 0.05:
                     return None
-                # But buy a bit less when averaging down
-                position_eur *= 0.75
-                btc_amount = position_eur / price
-                if position_eur < self.min_eur:
-                    return None
+                # No position reduction — accumulation means we avg down willingly
 
         # Build reasoning
         tier_name = self._get_tier_name(drawdown)
@@ -339,6 +382,11 @@ class AccumulationEngine(ProfitEngine):
 
         remaining = eur_available - position_eur
         reasoning_parts.append(f"remaining=€{remaining:.0f}")
+
+        # Update cooldown tracking
+        import time as _time
+        self._last_buy_price = price
+        self._last_buy_time = _time.time()
 
         return TradingDecision(
             should_buy=True,
@@ -386,16 +434,24 @@ class AccumulationEngine(ProfitEngine):
         return total_cost / total_btc if total_btc > 0 else new_price
 
     def get_accumulation_status(self, price: float, eur_available: float) -> dict:
-        """
-        Get detailed accumulation status for monitoring.
-
-        Shows: current tier, dry powder status, projected avg if buying now,
-        and how close you are to deploying reserve.
-        """
+        """Get detailed accumulation status including cooldown."""
+        import time as _time
         drawdown = (self._CYCLE_ATH - price) / self._CYCLE_ATH
         tier_name = self._get_tier_name(drawdown)
         tier_weight = self._get_tier_weight(drawdown)
         available_after_reserve = max(0, eur_available - self._RESERVE_EUR)
+
+        # Cooldown status
+        if self._last_buy_price > 0:
+            hours_since = (_time.time() - self._last_buy_time) / 3600
+            price_drop = (self._last_buy_price - price) / self._last_buy_price
+            cooldown_remaining = max(0, self._MIN_HOURS_BETWEEN_BUYS - hours_since)
+            price_needed = self._last_buy_price * (1 - self._MIN_PRICE_DROP_FOR_REBUY)
+        else:
+            hours_since = 999
+            price_drop = 0
+            cooldown_remaining = 0
+            price_needed = 0
 
         return {
             'mode': 'ACCUMULATION',
@@ -408,6 +464,10 @@ class AccumulationEngine(ProfitEngine):
             'reserve_intact': eur_available > self._RESERVE_EUR,
             'max_buy_eur': available_after_reserve * tier_weight,
             'bullets_remaining': max(0, int(available_after_reserve / self.min_eur)),
+            'cooldown_hours_left': cooldown_remaining,
+            'cooldown_price_trigger': price_needed,
+            'last_buy_price': self._last_buy_price,
+            'hours_since_last_buy': hours_since if self._last_buy_price > 0 else None,
         }
 
 

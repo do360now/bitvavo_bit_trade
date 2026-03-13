@@ -168,6 +168,22 @@ class TradingBot:
         logger.info(f"\n🛑 Shutting down (signal {signum})...")
         self.running = False
 
+    def _safe_sleep(self, seconds: int):
+        """Non-blocking sleep that respects Ctrl+C shutdown."""
+        check_interval = 10
+        remaining = seconds
+        while remaining > 0 and self.running:
+            time.sleep(min(check_interval, remaining))
+            remaining -= check_interval
+
+    def _safe_sleep(self, seconds: int):
+        """Non-blocking sleep that respects Ctrl+C shutdown."""
+        check_interval = 10
+        remaining = seconds
+        while remaining > 0 and self.running:
+            time.sleep(min(check_interval, remaining))
+            remaining -= check_interval
+
     def run(self):
         """
         Main trading loop.
@@ -187,7 +203,7 @@ class TradingBot:
                 state = self._get_market_state()
                 if not state:
                     logger.error("Failed to get market state, sleeping 60s...")
-                    time.sleep(60)
+                    self._safe_sleep(60)
                     continue
 
                 # Step 2: Fetch OHLCV for technical signals
@@ -233,7 +249,7 @@ class TradingBot:
 
                 # Step 9: Sleep
                 logger.info(f"😴 Sleeping {SLEEP_DURATION // 60} minutes...\n")
-                time.sleep(SLEEP_DURATION)
+                self._safe_sleep(SLEEP_DURATION)
 
         except KeyboardInterrupt:
             logger.info("\n🛑 Stopped by user")
@@ -263,7 +279,7 @@ class TradingBot:
 
                 wait_time = min(60 * self.consecutive_failures, 300)
                 logger.warning(f"💤 Waiting {wait_time}s for recovery...")
-                time.sleep(wait_time)
+                self._safe_sleep(wait_time)
                 return None
 
             if self.consecutive_failures > 0:
@@ -494,7 +510,10 @@ class TradingBot:
         # Show accumulation tier info
         if hasattr(self, 'trading') and self.trading and hasattr(self.trading, 'get_accumulation_status'):
             acc = self.trading.get_accumulation_status(state['price'], state['eur'])
-            logger.info(f"Tier: {acc['tier']} | Bullets: {acc['bullets_remaining']} | Reserve: {'✅' if acc['reserve_intact'] else '⚠️'}")
+            cooldown_str = ""
+            if acc.get('cooldown_hours_left', 0) > 0:
+                cooldown_str = f" | Cooldown: {acc['cooldown_hours_left']:.1f}h or €{acc['cooldown_price_trigger']:,.0f}"
+            logger.info(f"Tier: {acc['tier']} | Bullets: {acc['bullets_remaining']} | Reserve: {'✅' if acc['reserve_intact'] else '⚠️'}{cooldown_str}")
 
         logger.info("─" * 70)
 
